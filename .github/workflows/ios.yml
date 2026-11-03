@@ -1,0 +1,103 @@
+name: Native iPhone build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: Unsigned iPhone IPA for Sideloadly, or a simulator preview
+        type: choice
+        default: iphone-unsigned
+        options:
+          - iphone-unsigned
+          - simulator
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-ios-${{ github.ref }}-${{ inputs.build_target }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      PYTHONUNBUFFERED: '1'
+      BUILD_TARGET: ${{ inputs.build_target }}
+    steps:
+      - name: Read build kit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Select Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Check the build host
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          python3 - <<'PY'
+          import shutil
+          free = shutil.disk_usage('.').free // (1024 ** 3)
+          print(f'Available workspace space: {free} GiB')
+          if free < 25:
+              raise SystemExit('Insufficient disk space for the native Telegram build; no cleanup of unrelated host files is attempted')
+          PY
+          python3 Bootstrap.py --check-only
+
+      - name: Fetch the pinned official source and apply the preview patch
+        run: python3 Bootstrap.py --destination source
+
+      - name: Reuse public dependency downloads
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: source/NativePreview/.cache/repository
+          key: ios-public-downloads-xcode27.1-${{ hashFiles('manifest.json') }}
+          restore-keys: ios-public-downloads-xcode27.1-
+
+      - name: Configure Telegram API parameters privately
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: python3 source/NativePreview/manage.py configure
+
+      - name: Compile and test the complete native app
+        run: |
+          if [ "$BUILD_TARGET" = "iphone-unsigned" ]; then
+            python3 source/NativePreview/manage.py build --target iphone --unsigned --build-number "$GITHUB_RUN_NUMBER"
+          elif [ "$BUILD_TARGET" = "simulator" ]; then
+            python3 source/NativePreview/manage.py build --target simulator --build-number "$GITHUB_RUN_NUMBER"
+          else
+            exit 2
+          fi
+
+      - name: Validate and export the fresh artifact
+        run: |
+          mkdir -p native-output
+          if [ "$BUILD_TARGET" = "iphone-unsigned" ]; then
+            IPA="source/NativePreview/build-output/iphone/Telegram.ipa"
+            python3 source/NativePreview/artifact.py "$IPA" --target iphone --unsigned --output native-output/verification.json
+            cp "$IPA" native-output/Telegram-Native-unsigned.ipa
+            cp INSTALL-IPHONE.md native-output/INSTALL-IPHONE.md
+          else
+            IPA="source/NativePreview/build-output/simulator/Telegram.ipa"
+            python3 source/NativePreview/artifact.py "$IPA" --target simulator --output native-output/verification.json
+            SIMDIR="$RUNNER_TEMP/stargram-native-simulator"
+            mkdir -p "$SIMDIR"
+            ditto -x -k "$IPA" "$SIMDIR"
+            ditto -c -k --sequesterRsrc --keepParent "$SIMDIR/Payload/Telegram.app" native-output/Telegram-Native-Simulator.app.zip
+            python3 CI/capture.py --app "$SIMDIR/Payload/Telegram.app" --output native-output/screens
+          fi
+
+      - name: Save the built app and verification results
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Telegram-Native-${{ inputs.build_target }}-${{ github.run_number }}
+          path: native-output/
+          if-no-files-found: error
+          retention-days: 3

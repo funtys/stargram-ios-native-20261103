@@ -1,0 +1,866 @@
+diff --git a/.gitignore b/.gitignore
+--- a/.gitignore
++++ b/.gitignore
+@@ -66,6 +66,11 @@
+ */*.swp
+ *.swp
+ build-input/*
++/NativePreview/configuration.local.json
++/NativePreview/codesigning/
++/NativePreview/.cache/
++/NativePreview/build-output/
++/NativePreview/validation-report.local.json
+ **/*.pyc
+ *.pyc
+ submodules/OpusBinding/SharedHeaders/*
+diff --git a/Telegram/Telegram-iOS/InfoBazel.plist b/Telegram/Telegram-iOS/InfoBazel.plist
+--- a/Telegram/Telegram-iOS/InfoBazel.plist
++++ b/Telegram/Telegram-iOS/InfoBazel.plist
+@@ -11,7 +11,7 @@
+ 	<key>CFBundleDevelopmentRegion</key>
+ 	<string>en</string>
+ 	<key>CFBundleDisplayName</key>
+-	<string>${APP_NAME}</string>
++	<string>Telegram · Native</string>
+ 	<key>CFBundleExecutable</key>
+ 	<string>$(EXECUTABLE_NAME)</string>
+ 	<key>CFBundleIdentifier</key>
+diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift b/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift
+new file mode 100644
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift
+@@ -0,0 +1,53 @@
++import Foundation
++
++/// Device-only preview settings. These values never grant server-side entitlements.
++public enum LocalDemoPolicy {
++    public static let isEnabled = true
++    public static let paymentErrorDescription = "LOCAL_DEMO_PAYMENTS_DISABLED"
++    public static let defaultStarsBalance: Int64 = 9_999_999
++    public static let maximumStarsBalance: Int64 = 1_000_000_000_000
++
++    public static func blocks(functionName: String, paidStars: Int64 = 0) -> Bool {
++        guard self.isEnabled else {
++            return false
++        }
++        if functionName.hasPrefix("payments.") {
++            let method = String(functionName.dropFirst("payments.".count))
++            if method.hasPrefix("getPaymentForm") {
++                return true
++            }
++            return !["get", "check", "search", "resolve"].contains(where: { method.hasPrefix($0) })
++        }
++        if functionName.hasPrefix("messages.sendPaid") || functionName == "phone.joinGroupCallStars" {
++            return true
++        }
++        return paidStars > 0
++    }
++}
++
++/// Stored separately for each signed-in account, inside this app's own sandbox.
++enum LocalDemoBalanceStore {
++    private static func key(accountId: Int64) -> String {
++        return "stargram.native.demo.stars.\(accountId)"
++    }
++
++    static func balance(accountId: Int64, defaults: UserDefaults = .standard) -> Int64 {
++        guard let stored = defaults.object(forKey: self.key(accountId: accountId)) as? NSNumber else {
++            return LocalDemoPolicy.defaultStarsBalance
++        }
++        return min(LocalDemoPolicy.maximumStarsBalance, max(0, stored.int64Value))
++    }
++
++    static func add(accountId: Int64, amount: Int64, defaults: UserDefaults = .standard) -> Int64 {
++        let current = self.balance(accountId: accountId, defaults: defaults)
++        let (sum, overflow) = current.addingReportingOverflow(amount)
++        let bounded: Int64
++        if overflow {
++            bounded = amount > 0 ? LocalDemoPolicy.maximumStarsBalance : 0
++        } else {
++            bounded = min(LocalDemoPolicy.maximumStarsBalance, max(0, sum))
++        }
++        defaults.set(NSNumber(value: bounded), forKey: self.key(accountId: accountId))
++        return bounded
++    }
++}
+diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift b/submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift
+new file mode 100644
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift
+@@ -0,0 +1,19 @@
++import Foundation
++internal import TelegramApi
++
++/// Called before a request reaches either MTProto network engine.
++func localDemoBlocksRequest(_ description: FunctionDescription) -> Bool {
++    if LocalDemoPolicy.blocks(functionName: description.name) {
++        return true
++    }
++    if description.name.hasPrefix("messages.send") || description.name == "messages.forwardMessages" || description.name.hasPrefix("phone.joinGroupCall") {
++        for (name, parameter) in description.parameters {
++            if name == "allowPaidStars" || name == "allow_paid_stars" || name == "paidStars" || name == "paid_stars" {
++                if let amount = parameter.value as? NSNumber, LocalDemoPolicy.blocks(functionName: description.name, paidStars: amount.int64Value) {
++                    return true
++                }
++            }
++        }
++    }
++    return false
++}
+diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
+--- a/submodules/TelegramCore/Sources/Network/Network.swift
++++ b/submodules/TelegramCore/Sources/Network/Network.swift
+@@ -1372,6 +1372,9 @@
+     }
+     
+     func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
++        if localDemoBlocksRequest(data.0) {
++            return .fail(MTRpcError(errorCode: 400, errorDescription: LocalDemoPolicy.paymentErrorDescription))
++        }
+         let requestService = self.requestService
+         return Signal { [requestService] subscriber in
+             let request = NetworkEngineRequest(
+@@ -1418,6 +1421,9 @@
+     }
+     
+     func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
++        if localDemoBlocksRequest(data.0) {
++            return .fail(MTRpcError(errorCode: 400, errorDescription: LocalDemoPolicy.paymentErrorDescription))
++        }
+         let requestService = self.requestService
+         return Signal { [requestService] subscriber in
+             let request = NetworkEngineRequest(
+diff --git a/submodules/TelegramCore/Sources/Network/Download.swift b/submodules/TelegramCore/Sources/Network/Download.swift
+--- a/submodules/TelegramCore/Sources/Network/Download.swift
++++ b/submodules/TelegramCore/Sources/Network/Download.swift
+@@ -270,6 +270,9 @@
+     }
+     
+     func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), expectedResponseSize: Int32? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
++        if localDemoBlocksRequest(data.0) {
++            return .fail(MTRpcError(errorCode: 400, errorDescription: LocalDemoPolicy.paymentErrorDescription))
++        }
+         return Signal { subscriber in
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+@@ -307,6 +310,9 @@
+     }
+     
+     func requestWithAdditionalData<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil, failOnServerErrors: Bool = false, expectedResponseSize: Int32? = nil) -> Signal<(T, Double), (MTRpcError, Double)> {
++        if localDemoBlocksRequest(data.0) {
++            return .fail((MTRpcError(errorCode: 400, errorDescription: LocalDemoPolicy.paymentErrorDescription), 0.0))
++        }
+         return Signal { subscriber in
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+@@ -344,6 +350,9 @@
+     }
+     
+     func rawRequest(_ data: (FunctionDescription, Buffer, (Buffer) -> Any?), automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil, failOnServerErrors: Bool = false, logPrefix: String = "", expectedResponseSize: Int32? = nil) -> Signal<(Any, NetworkResponseInfo), (MTRpcError, Double)> {
++        if localDemoBlocksRequest(data.0) {
++            return .fail((MTRpcError(errorCode: 400, errorDescription: LocalDemoPolicy.paymentErrorDescription), 0.0))
++        }
+         let requestService = self.requestService
+         return Signal { [requestService] subscriber in
+             let request = NetworkEngineRequest(
+diff --git a/submodules/TelegramCore/Sources/Network/MultiplexedRequestManager.swift b/submodules/TelegramCore/Sources/Network/MultiplexedRequestManager.swift
+--- a/submodules/TelegramCore/Sources/Network/MultiplexedRequestManager.swift
++++ b/submodules/TelegramCore/Sources/Network/MultiplexedRequestManager.swift
+@@ -401,6 +401,9 @@
+     }
+     
+     func request<T>(to target: MultiplexedRequestTarget, consumerId: Int64, resourceId: String?, data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: MediaResourceFetchTag?, continueInBackground: Bool, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil, expectedResponseSize: Int32?) -> Signal<T, MTRpcError> {
++        if localDemoBlocksRequest(data.0) {
++            return .fail(MTRpcError(errorCode: 400, errorDescription: LocalDemoPolicy.paymentErrorDescription))
++        }
+         return Signal { subscriber in
+             let disposable = MetaDisposable()
+             self.context.with { context in
+@@ -422,6 +425,9 @@
+     }
+     
+     func requestWithAdditionalInfo<T>(to target: MultiplexedRequestTarget, consumerId: Int64, resourceId: String?, data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: MediaResourceFetchTag?, continueInBackground: Bool, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil, expectedResponseSize: Int32?) -> Signal<(T, NetworkResponseInfo), (MTRpcError, Double)> {
++        if localDemoBlocksRequest(data.0) {
++            return .fail((MTRpcError(errorCode: 400, errorDescription: LocalDemoPolicy.paymentErrorDescription), 0.0))
++        }
+         return Signal { subscriber in
+             let disposable = MetaDisposable()
+             self.context.with { context in
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift b/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
+@@ -429,6 +429,9 @@
+ }
+ 
+ private func _internal_requestStarsState(account: Account, peerId: EnginePeer.Id, ton: Bool, mode: StarsTransactionsContext.Mode, subscriptionId: String?, offset: String?, limit: Int32) -> Signal<InternalStarsStatus, RequestStarsStateError> {
++    if LocalDemoPolicy.isEnabled && !ton && peerId == account.peerId {
++        return .single(InternalStarsStatus(balance: StarsAmount(value: LocalDemoBalanceStore.balance(accountId: peerId.toInt64()), nanos: 0), subscriptionsMissingBalance: nil, subscriptions: [], nextSubscriptionsOffset: nil, transactions: [], nextTransactionsOffset: nil))
++    }
+     return account.postbox.transaction { transaction -> Peer? in
+         return transaction.getPeer(peerId)
+     } 
+@@ -503,6 +506,9 @@
+ }
+ 
+ private func _internal_requestStarsSubscriptions(account: Account, peerId: EnginePeer.Id, offset: String, missingBalance: Bool) -> Signal<InternalStarsStatus, RequestStarsSubscriptionsError> {
++    if LocalDemoPolicy.isEnabled && peerId == account.peerId {
++        return .single(InternalStarsStatus(balance: StarsAmount(value: LocalDemoBalanceStore.balance(accountId: peerId.toInt64()), nanos: 0), subscriptionsMissingBalance: nil, subscriptions: [], nextSubscriptionsOffset: nil, transactions: [], nextTransactionsOffset: nil))
++    }
+     return account.postbox.transaction { transaction -> Peer? in
+         return transaction.getPeer(peerId)
+     }
+@@ -585,6 +591,9 @@
+             guard let self, let state = self._state, let balance = balances[self.peerId] else {
+                 return
+             }
++            if LocalDemoPolicy.isEnabled && !self.ton {
++                return
++            }
+             self.updateState(StarsContext.State(flags: [], balance: balance, subscriptions: state.subscriptions, canLoadMoreSubscriptions: state.canLoadMoreSubscriptions, transactions: state.transactions, canLoadMoreTransactions: state.canLoadMoreTransactions, isLoading: false))
+             self.load(force: true)
+         })
+@@ -599,6 +608,12 @@
+     private var previousLoadTimestamp: Double?
+     func load(force: Bool) {
+         assert(Queue.mainQueue().isCurrent())
++
++        if LocalDemoPolicy.isEnabled && !self.ton {
++            let balance = StarsAmount(value: LocalDemoBalanceStore.balance(accountId: self.peerId.toInt64()), nanos: 0)
++            self.updateState(StarsContext.State(flags: [], balance: balance, subscriptions: [], canLoadMoreSubscriptions: false, transactions: self._state?.transactions ?? [], canLoadMoreTransactions: false, isLoading: false))
++            return
++        }
+         
+         let currentTimestamp = CFAbsoluteTimeGetCurrent()
+         if let previousLoadTimestamp = self.previousLoadTimestamp, currentTimestamp - previousLoadTimestamp < 60 && !force {
+@@ -631,10 +646,21 @@
+             let count =  CurrencyAmount(amount: balance, currency: self.ton ? .ton : .stars)
+             transactions.insert(.init(flags: [.isLocal], id: "\(arc4random())", count: count, date: Int32(Date().timeIntervalSince1970), peer: .appStore, title: nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil, paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil, starGift: nil, floodskipNumber: nil, starrefCommissionPermille: nil, starrefPeerId: nil, starrefAmount: nil, paidMessageCount: nil, premiumGiftMonths: nil, adsProceedsFromDate: nil, adsProceedsToDate: nil), at: 0)
+         }
+-        self.updateState(StarsContext.State(flags: [.isPendingBalance], balance: max(StarsAmount(value: 0, nanos: 0), state.balance + balance), subscriptions: state.subscriptions, canLoadMoreSubscriptions: state.canLoadMoreSubscriptions, transactions: transactions, canLoadMoreTransactions: state.canLoadMoreTransactions, isLoading: state.isLoading))
++        let localDemo = LocalDemoPolicy.isEnabled && !self.ton
++        let updatedBalance: StarsAmount
++        if localDemo {
++            updatedBalance = StarsAmount(value: LocalDemoBalanceStore.add(accountId: self.peerId.toInt64(), amount: balance.value), nanos: 0)
++        } else {
++            updatedBalance = max(StarsAmount(value: 0, nanos: 0), state.balance + balance)
++        }
++        self.updateState(StarsContext.State(flags: localDemo ? [] : [.isPendingBalance], balance: updatedBalance, subscriptions: state.subscriptions, canLoadMoreSubscriptions: state.canLoadMoreSubscriptions, transactions: transactions, canLoadMoreTransactions: state.canLoadMoreTransactions, isLoading: state.isLoading))
+     }
+     
+     fileprivate func updateBalance(_ balance: StarsAmount, transactions: [StarsContext.State.Transaction]?) {
++        if LocalDemoPolicy.isEnabled && !self.ton {
++            self.load(force: true)
++            return
++        }
+         guard let state = self._state else {
+             return
+         }
+diff --git a/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift b/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
+--- a/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
++++ b/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
+@@ -348,6 +348,9 @@
+     }
+     
+     public func buyProduct(_ product: Product, quantity: Int32 = 1, purpose: AppStoreTransactionPurpose, reportPending: Bool = false) -> Signal<PurchaseState, PurchaseError> {
++        if LocalDemoPolicy.isEnabled {
++            return .fail(.notAllowed)
++        }
+         let accountPeerId: String
+         switch self.engine {
+         case let .authorized(engine):
+diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift
+--- a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift
++++ b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift
+@@ -536,7 +536,7 @@
+                 titleString = environment.strings.Stars_Ton_Title
+                 descriptionString = environment.strings.Stars_Ton_Description
+             } else {
+-                titleString = environment.strings.Stars_Intro_Title
++                titleString = environment.strings.Stars_Intro_Title + (LocalDemoPolicy.isEnabled ? " · Демо" : "")
+                 descriptionString = environment.strings.Stars_Intro_Description
+             }
+                        
+diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
+--- a/submodules/TelegramUI/Sources/AppDelegate.swift
++++ b/submodules/TelegramUI/Sources/AppDelegate.swift
+@@ -319,7 +319,9 @@
+         let appGroupName = "group.\(baseAppBundleId)"
+ 
+         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
+-        configuration.sharedContainerIdentifier = appGroupName
++        if !LocalDemoPolicy.isEnabled || FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName) != nil {
++            configuration.sharedContainerIdentifier = appGroupName
++        }
+         configuration.isDiscretionary = false
+         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+         self.urlSessions.append(session)
+@@ -570,10 +572,15 @@
+         
+         let baseAppBundleId = Bundle.main.bundleIdentifier!
+         let appGroupName = "group.\(baseAppBundleId)"
+-        try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
++        let previewStorage = try? NativePreviewStorage.resolve(
++            groupURL: FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName),
++            privateRootURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
++            allowPrivateContainer: LocalDemoPolicy.isEnabled
++        )
++        try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService, useAppPrivateKeychain: previewStorage?.usesPrivateContainer ?? false), privateAccessGroup: {
+             BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
+         })
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        let maybeAppGroupUrl = previewStorage?.url
+         
+         let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)
+         self.buildConfig = buildConfig
+diff --git a/submodules/TelegramUI/Sources/NativePreviewStorage.swift b/submodules/TelegramUI/Sources/NativePreviewStorage.swift
+new file mode 100644
+--- /dev/null
++++ b/submodules/TelegramUI/Sources/NativePreviewStorage.swift
+@@ -0,0 +1,20 @@
++import Foundation
++
++/// Uses the existing group when available; a standalone preview stays in its own app sandbox.
++enum NativePreviewStorage {
++    enum StorageError: Error {
++        case unavailable
++    }
++
++    static func resolve(groupURL: URL?, privateRootURL: URL?, allowPrivateContainer: Bool) throws -> (url: URL, usesPrivateContainer: Bool) {
++        if let groupURL {
++            return (groupURL, false)
++        }
++        guard allowPrivateContainer, let privateRootURL, privateRootURL.isFileURL else {
++            throw StorageError.unavailable
++        }
++        let directory = privateRootURL.appendingPathComponent("StargramNative", isDirectory: true)
++        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++        return (directory, true)
++    }
++}
+diff --git a/submodules/PasscodeCore/Sources/Passcode.swift b/submodules/PasscodeCore/Sources/Passcode.swift
+--- a/submodules/PasscodeCore/Sources/Passcode.swift
++++ b/submodules/PasscodeCore/Sources/Passcode.swift
+@@ -14,12 +14,14 @@
+     public let processRole: ProcessRole
+     public let biometricKeychainService: String?
+     public let keychainScope: String?
+-
+-    public init(appGroupIdentifier: String, processRole: ProcessRole, biometricKeychainService: String? = nil, keychainScope: String? = nil) {
++    public let useAppPrivateKeychain: Bool
++
++    public init(appGroupIdentifier: String, processRole: ProcessRole, biometricKeychainService: String? = nil, keychainScope: String? = nil, useAppPrivateKeychain: Bool = false) {
+         self.appGroupIdentifier = appGroupIdentifier
+         self.processRole = processRole
+         self.biometricKeychainService = biometricKeychainService
+         self.keychainScope = keychainScope
++        self.useAppPrivateKeychain = useAppPrivateKeychain
+     }
+ }
+ 
+@@ -38,6 +40,9 @@
+     public func configure(_ configuration: PasscodeConfiguration, privateAccessGroup: (() -> String?)? = nil) throws {
+         self.mutex.lock()
+         defer { self.mutex.unlock() }
++        guard !configuration.useAppPrivateKeychain || configuration.processRole == .mainApp else {
++            throw PasscodeError.unavailable
++        }
+         #if os(macOS)
+         guard !configuration.appGroupIdentifier.isEmpty, configuration.appGroupIdentifier.contains(".") else {
+             throw PasscodeError.unavailable
+@@ -67,6 +72,12 @@
+         self.mutex.lock()
+         defer { self.mutex.unlock() }
+         return self.configuration?.processRole == .mainApp
++    }
++
++    var usesAppPrivateKeychain: Bool {
++        self.mutex.lock()
++        defer { self.mutex.unlock() }
++        return self.configuration?.useAppPrivateKeychain ?? false
+     }
+ 
+     public func sharedAccessGroup() throws -> String {
+@@ -124,7 +135,9 @@
+             kSecAttrSynchronizable as String: false
+         ]
+         #if !os(macOS)
+-        query[kSecAttrAccessGroup as String] = try account.hasPrefix("biometric.") ? self.environment.privateAccessGroup() : self.environment.sharedAccessGroup()
++        if !self.environment.usesAppPrivateKeychain {
++            query[kSecAttrAccessGroup as String] = try account.hasPrefix("biometric.") ? self.environment.privateAccessGroup() : self.environment.sharedAccessGroup()
++        }
+         #endif
+         return query
+     }
+diff --git a/NativePreview/manage.py b/NativePreview/manage.py
+new file mode 100644
+--- /dev/null
++++ b/NativePreview/manage.py
+@@ -0,0 +1,172 @@
++#!/usr/bin/env python3
++"""Configure and build the native iPhone preview without handling account sessions."""
++import argparse
++import json
++import os
++from pathlib import Path
++import platform
++import re
++import shlex
++import shutil
++import subprocess
++import sys
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++HERE = Path(__file__).resolve().parent
++CONFIG = HERE / "configuration.local.json"
++
++
++def read_config():
++    source = CONFIG if CONFIG.is_file() else HERE / "configuration.example.json"
++    return json.loads(source.read_text(encoding="utf-8-sig"))
++
++
++def valid_credentials(config):
++    return str(config.get("api_id", "")).isdigit() and int(config["api_id"]) > 0 and bool(re.fullmatch(r"[a-fA-F0-9]{32}", str(config.get("api_hash", ""))))
++
++
++def valid_team(config):
++    value = config.get("team_id", "")
++    return bool(re.fullmatch(r"[A-Z0-9]{10}", value)) and value not in ("0000000000", "YOURTEAMID")
++
++
++def check():
++    config = read_config()
++    manifest = json.loads((HERE / "upstream.json").read_text(encoding="utf-8"))
++    missing = [entry["path"] for entry in manifest["submodules"] if not any((ROOT / entry["path"]).glob("*"))]
++    return {
++        "native_source": "TelegramMessenger/Telegram-iOS",
++        "upstream_commit": manifest["commit"],
++        "upstream_version": json.loads((ROOT / "versions.json").read_text())["app"],
++        "host": platform.system(),
++        "mac_required_for_build": True,
++        "xcode_available": sys.platform == "darwin" and shutil.which("xcrun") is not None,
++        "required_xcode": json.loads((ROOT / "versions.json").read_text())["xcode"],
++        "api_configured": valid_credentials(config),
++        "apple_team_configured": valid_team(config),
++        "missing_submodules": missing,
++        "native_compilation_verified": False,
++        "device_ui_verified": False,
++        "virtual_gifts_ported": False,
++    }
++
++
++def configure(args):
++    config = read_config()
++    if os.environ.get("TELEGRAM_API_ID"):
++        config["api_id"] = os.environ["TELEGRAM_API_ID"]
++    if os.environ.get("TELEGRAM_API_HASH"):
++        config["api_hash"] = os.environ["TELEGRAM_API_HASH"]
++    team = args.team_id or os.environ.get("APPLE_TEAM_ID")
++    if team:
++        if not re.fullmatch(r"[A-Z0-9]{10}", team):
++            raise ValueError("Apple Team ID must contain 10 uppercase letters or digits")
++        config["team_id"] = team
++    if args.bundle_id:
++        if not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+){2,}", args.bundle_id):
++            raise ValueError("Bundle identifier must use reverse-DNS notation")
++        config["bundle_id"] = args.bundle_id
++    if not valid_credentials(config):
++        raise ValueError("Set TELEGRAM_API_ID and TELEGRAM_API_HASH locally, or copy the existing private configuration file")
++    CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
++    if sys.platform != "win32":
++        CONFIG.chmod(0o600)
++    print("Private configuration saved; API values are not printed")
++
++
++def require_mac():
++    if sys.platform != "darwin" or shutil.which("xcrun") is None:
++        raise ValueError("Native iOS compilation requires macOS with Xcode; Windows can prepare and inspect this source project")
++
++
++def policy_tests():
++    require_mac()
++    # A disposable UserDefaults suite is used by the test; no Telegram account is opened.
++    with tempfile.TemporaryDirectory(prefix="stargram-native-policy-") as directory:
++        binary = Path(directory) / "policy-tests"
++        subprocess.run([
++            "xcrun", "swiftc", "-warnings-as-errors",
++            str(ROOT / "submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift"),
++            str(ROOT / "submodules/TelegramUI/Sources/NativePreviewStorage.swift"),
++            str(HERE / "Tests/main.swift"), "-o", str(binary),
++        ], cwd=ROOT, check=True)
++        subprocess.run([str(binary)], cwd=ROOT, check=True)
++
++
++def make_command(args):
++    command = [sys.executable, "build-system/Make/Make.py", "--cacheDir=" + str(HERE / ".cache")]
++    unsigned = getattr(args, "unsigned", False)
++    if args.action == "build":
++        flags = ["--jobs=2", "--local_resources=memory=HOST_RAM*0.6", "--repository_cache=" + str(HERE / ".cache/repository")]
++        if args.target == "simulator" or unsigned:
++            flags.append("--//Telegram:disableProvisioningProfiles")
++        if unsigned:
++            flags += ["--//Telegram:disableExtensions", "--features=disable_legacy_signing", "--define=apple.package_swift_support=no"]
++        command.append("--bazelArguments=" + shlex.join(flags))
++    command += ["generateProject" if args.action == "project" else "build", "--configurationPath=" + str(CONFIG)]
++    if args.signing_dir:
++        command += ["--codesigningInformationPath=" + str(Path(args.signing_dir).resolve())]
++    else:
++        command += ["--xcodeManagedCodesigning"]
++    if args.action == "project":
++        if args.target == "simulator":
++            command.append("--disableProvisioningProfiles")
++    else:
++        command += ["--buildNumber=" + str(args.build_number), "--continueOnError"]
++        command += ["--configuration=" + ("debug_sim_arm64" if args.target == "simulator" else "release_arm64")]
++        command += ["--outputBuildArtifactsPath=" + str(HERE / "build-output" / args.target)]
++    return command
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("action", choices=["check", "configure", "policy-tests", "project", "build"])
++    parser.add_argument("--team-id")
++    parser.add_argument("--bundle-id")
++    parser.add_argument("--target", choices=["simulator", "iphone"], default="simulator")
++    parser.add_argument("--signing-dir", help="Local directory containing your own certs/ and profiles/")
++    parser.add_argument("--build-number", type=int, default=100001)
++    parser.add_argument("--unsigned", action="store_true", help="Build an iPhone IPA for later signing on the installer's own computer; does not bypass iOS signing")
++    parser.add_argument("--print-command", action="store_true", help="Print the build command without running it; no API values are exposed")
++    args = parser.parse_args()
++    if args.action == "check":
++        print(json.dumps(check(), ensure_ascii=False, indent=2))
++        return
++    if args.action == "configure":
++        configure(args)
++        return
++    if args.action == "policy-tests":
++        policy_tests()
++        return
++    if args.unsigned and (args.action != "build" or args.target != "iphone"):
++        raise ValueError("--unsigned is only valid for build --target iphone")
++    command = make_command(args)
++    if args.print_command:
++        print(shlex.join(command))
++        return
++    require_mac()
++    config = read_config()
++    if not CONFIG.is_file() or not valid_credentials(config):
++        raise ValueError("Create configuration.local.json with the configure command before building")
++    if args.target == "iphone" and not args.unsigned and not valid_team(config):
++        raise ValueError("A real Apple Team ID is required for an iPhone build")
++    if args.action == "build" and args.target == "iphone" and not args.unsigned and not args.signing_dir:
++        raise ValueError("A signed IPA needs --signing-dir with your certificates and provisioning profiles; use project --target iphone for Xcode-managed development")
++    if check()["missing_submodules"]:
++        raise ValueError("Pinned source submodules are missing; use the native kit Bootstrap.py")
++    if args.build_number < 1:
++        raise ValueError("Build number must be positive")
++    policy_tests()
++    subprocess.run(command, cwd=ROOT, check=True)
++
++
++if __name__ == "__main__":
++    try:
++        main()
++    except (ValueError, OSError) as error:
++        print("Error: " + str(error), file=sys.stderr)
++        sys.exit(2)
++    except subprocess.CalledProcessError as error:
++        print("Native build/check failed; no successful IPA is claimed", file=sys.stderr)
++        sys.exit(error.returncode or 1)
+diff --git a/NativePreview/artifact.py b/NativePreview/artifact.py
+new file mode 100644
+--- /dev/null
++++ b/NativePreview/artifact.py
+@@ -0,0 +1,86 @@
++#!/usr/bin/env python3
++"""Validate a freshly built native Apple archive before presenting it as an artifact."""
++import argparse
++import hashlib
++import json
++from pathlib import Path, PurePosixPath
++import plistlib
++import struct
++import zipfile
++
++
++def macho_platform(binary):
++    if len(binary) < 32 or binary[:4] != b"\xcf\xfa\xed\xfe":
++        raise ValueError("Expected a 64-bit little-endian Mach-O executable")
++    header = struct.unpack_from("<8I", binary)
++    if header[1] != 0x0100000C:
++        raise ValueError("The app executable is not arm64")
++    cursor = 32
++    for _ in range(header[4]):
++        if cursor + 8 > len(binary):
++            raise ValueError("Truncated Mach-O load command")
++        command, size = struct.unpack_from("<2I", binary, cursor)
++        if size < 8 or cursor + size > len(binary):
++            raise ValueError("Invalid Mach-O load command size")
++        if command == 0x32 and size >= 24:
++            return struct.unpack_from("<I", binary, cursor + 8)[0]
++        cursor += size
++    raise ValueError("Missing LC_BUILD_VERSION platform identifier")
++
++
++def validate(archive, target, unsigned):
++    with zipfile.ZipFile(archive) as bundle:
++        for entry in bundle.namelist():
++            path = PurePosixPath(entry)
++            if path.is_absolute() or ".." in path.parts or "\\" in entry:
++                raise ValueError("Archive contains an unsafe file path")
++        if bundle.testzip() is not None:
++            raise ValueError("The built archive is corrupt")
++        plists = [name for name in bundle.namelist() if len(PurePosixPath(name).parts) == 3 and name.startswith("Payload/") and name.endswith(".app/Info.plist")]
++        if len(plists) != 1:
++            raise ValueError("Expected exactly one main app under Payload/")
++        plist = plistlib.loads(bundle.read(plists[0]))
++        root = plists[0].removesuffix("Info.plist")
++        executable = plist.get("CFBundleExecutable", "")
++        if not executable or "/" in executable or executable in (".", ".."):
++            raise ValueError("Invalid app executable name")
++        actual_platform = macho_platform(bundle.read(root + executable))
++        expected_platform = 2 if target == "iphone" else 7
++        if actual_platform != expected_platform:
++            raise ValueError("Wrong archive platform: iPhone and simulator artifacts cannot be interchanged")
++        if unsigned:
++            if root + "embedded.mobileprovision" in bundle.namelist():
++                raise ValueError("An unsigned artifact must not include a personal provisioning profile")
++            if any(name.startswith(root + "PlugIns/") and ".appex/" in name for name in bundle.namelist()):
++                raise ValueError("Standalone sideload preview unexpectedly includes extensions")
++        return {
++            "archive": Path(archive).name,
++            "sha256": hashlib.sha256(Path(archive).read_bytes()).hexdigest(),
++            "bytes": Path(archive).stat().st_size,
++            "target": target,
++            "macho_platform": actual_platform,
++            "bundle_id": plist.get("CFBundleIdentifier"),
++            "version": plist.get("CFBundleShortVersionString"),
++            "signing_required_before_install": unsigned,
++            "device_execution_verified": False,
++        }
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("archive", type=Path)
++    parser.add_argument("--target", choices=["iphone", "simulator"], required=True)
++    parser.add_argument("--unsigned", action="store_true")
++    parser.add_argument("--output", type=Path)
++    args = parser.parse_args()
++    if args.unsigned and args.target != "iphone":
++        raise ValueError("Only an iPhone artifact can be exported for re-signing")
++    report = validate(args.archive, args.target, args.unsigned)
++    text = json.dumps(report, indent=2) + "\n"
++    if args.output:
++        args.output.write_text(text, encoding="utf-8")
++    print(text)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/NativePreview/README.md b/NativePreview/README.md
+new file mode 100644
+--- /dev/null
++++ b/NativePreview/README.md
+@@ -0,0 +1,51 @@
++# Telegram · Native для iPhone
++
++Нативный проект на открытых исходниках TelegramMessenger/Telegram-iOS. Исходный интерфейс, жесты, плеер, анимации, авторизация, чаты и обработка настоящего Premium сохранены. Это неофициальная демо-сборка. Отдельное приложение для Mac не создаётся.
++
++**Статус:** исходники и настройки подготовлены на Windows. Проект ещё не компилировался в Xcode, не подписывался и не проверялся на iPhone или симуляторе. Готового установочного IPA нет. Версия и требуемый Xcode закреплены в `../versions.json`; точная ревизия и зависимости — в `upstream.json`.
++
++## Изменения
++
++* Локальный баланс Stars по умолчанию 9 999 999, отдельно для каждого аккаунта
++* Значение сохраняется в контейнере приложения и не подменяет данные на сервере
++* Раздел Stars помечен «Демо»; история реальных операций не смешивается с демо-балансом
++* Добавлена блокировка платёжных форм, финансовых изменений, платных сообщений и запуска покупок StoreKit
++* Premium определяется по настоящему аккаунту; новая подписка не покупается и не подделывается
++* Для установки без App Groups добавлен запасной путь в собственном контейнере приложения и режим собственного Keychain; шифрование и проверка код-пароля сохраняются
++* Виртуальные подарки в чатах и профилях в эту нативную версию пока не перенесены
++
++Блокировка добавлена в исходники, но её работа внутри собранного iOS-приложения ещё не проверена. Это предварительный проект, а не проверенный релиз.
++
++## Подготовка на Mac
++
++Нужен Mac с Xcode версии из `../versions.json`, командными инструментами Xcode, Python 3 и Git. Для разработки самого приложения Mac-версия Telegram не требуется.
++
++Рекомендуется распаковать `Telegram-iOS-Native-kit.zip` на Mac и выполнить `python3 Bootstrap.py --destination Telegram-iOS-Native`. Скрипт получает точную официальную ревизию и её подмодули, проверяет контрольную сумму патча и применяет изменения. Это также восстанавливает правильные Unix-ссылки и права файлов после подготовки на Windows. Скрипт не публикует исходники и не отправляет учётные данные.
++
++Команды ниже выполняются из полученного каталога `Telegram-iOS-Native`.
++
++1. Скопировать свой `NativePreview/configuration.local.json` из подготовленного проекта либо задать `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` локально через окружение
++2. Выполнить `python3 NativePreview/manage.py configure --team-id ВАШ_TEAM_ID`. Для симулятора настоящий Team ID не нужен: достаточно `configure` с API-настройками
++3. Проверить состояние: `python3 NativePreview/manage.py check`
++4. Сгенерировать проект симулятора: `python3 NativePreview/manage.py project --target simulator`
++5. Для подключённого iPhone: `python3 NativePreview/manage.py project --target iphone`, выбрать свой Team и iPhone в Xcode, затем Run
++
++`configuration.local.json` исключён из Git и переносимого комплекта. В локальной копии на этом ПК уже настроены ранее предоставленные API-параметры; повторный запрос API ID/hash внутри приложения не добавляется. Коды входа, пароль и сессию каждый пользователь получает и создаёт самостоятельно. При обновлении следует сохранять Bundle ID и Apple Team, чтобы приложение использовало прежний контейнер данных.
++
++Быстрая генерация проекта с подписью Xcode, как и в исходном Telegram, отключает расширения. Полноценная доставка push требует собственных APNs-настроек и профилей приложения и расширений; сервер уведомлений оригинального Telegram не становится доступен автоматически. Siri и iCloud в этой конфигурации отключены.
++
++## Сборка и проверки на Mac
++
++`python3 NativePreview/manage.py policy-tests` компилирует и запускает проверки платёжной политики и сохранения локального баланса в одноразовом хранилище, без Telegram-аккаунта и сети. Эти же проверки запускаются перед генерацией проекта и полной сборкой.
++
++Полная сборка для симулятора Apple Silicon: `python3 NativePreview/manage.py build --target simulator`
++
++Подписанный IPA для iPhone: `python3 NativePreview/manage.py build --target iphone --signing-dir /путь/к/своей/подписи`. В каталоге подписи нужны собственные `certs/` и `profiles/` согласно официальной инструкции. Результат берётся из свежего `bazel-bin/Telegram/Telegram.ipa` и копируется в `NativePreview/build-output/iphone/Telegram.ipa`. Автоматической публикации в App Store или TestFlight нет.
++
++Для последующей установки с собственной подписью через Sideloadly на Windows предусмотрен `python3 NativePreview/manage.py build --target iphone --unsigned`. Этот режим отключает расширения и этап подписи, но не отменяет требование подписи при установке на iPhone. Полученный IPA необходимо проверить и затем подписать на компьютере установщика. Наличие файла не означает проверку работы на телефоне. Облачная обёртка в соседнем `Telegram-iOS-Cloud-Build` позволяет выполнить этот этап на GitHub macOS без собственного Mac.
++
++Перед использованием нужны полная компиляция, запуск и проверка входа, восстановления сессии, чатов, обычных сообщений, Premium, Stars, видео и жестов. Визуальные изменения следует оценить по кадрам записи симулятора, как требует `../AGENTS.md`. Не заявлять проверку анимаций без записи. В процессе проверки не выполнять реальные платежи и не отправлять тестовые сообщения другим людям.
++
++Исходная инструкция: https://github.com/TelegramMessenger/Telegram-iOS#readme
++
++Исходные лицензии и авторство сохранены. Для распространения изменённого клиента необходимо предоставлять соответствующие исходники и ясно указывать, что клиент неофициальный.
+diff --git a/NativePreview/configuration.example.json b/NativePreview/configuration.example.json
+new file mode 100644
+--- /dev/null
++++ b/NativePreview/configuration.example.json
+@@ -0,0 +1,14 @@
++{
++  "bundle_id": "local.stargram.nativeclient.ios",
++  "api_id": "",
++  "api_hash": "",
++  "team_id": "0000000000",
++  "app_center_id": "0",
++  "is_internal_build": "false",
++  "is_appstore_build": "false",
++  "appstore_id": "0",
++  "app_specific_url_scheme": "stargram-native",
++  "premium_iap_product_id": "",
++  "enable_siri": false,
++  "enable_icloud": false
++}
+diff --git a/NativePreview/upstream.json b/NativePreview/upstream.json
+new file mode 100644
+--- /dev/null
++++ b/NativePreview/upstream.json
+@@ -0,0 +1,69 @@
++{
++  "repository": "https://github.com/TelegramMessenger/Telegram-iOS.git",
++  "commit": "279f89e4d4f63f17227bf877dc3d8990f22ecd58",
++  "prepared_date": "2026-11-03",
++  "versions": {
++    "app": "13.1.2",
++    "xcode": "27.1",
++    "deploy_xcode": "27.1",
++    "bazel": "9.2.0:dd466352a3e4d3581b8898740ee1ff208866ccbe25f8d367c5dcb950219587e6",
++    "macos": "27"
++  },
++  "submodules": [
++    {
++      "path": "build-system/bazel-rules/apple_support",
++      "commit": "872de7149cfbcaaf854c7867e98b6d4798ba0d27"
++    },
++    {
++      "path": "build-system/bazel-rules/rules_apple",
++      "commit": "485016eb5b0948cc17307064e7977a6d68e94046"
++    },
++    {
++      "path": "build-system/bazel-rules/rules_swift",
++      "commit": "dd10a2497a691237eb9716586acee1a9c4fe3e59"
++    },
++    {
++      "path": "build-system/bazel-rules/rules_xcodeproj",
++      "commit": "f6a54168d19f917d0630e7d4efa8f2f9fa0ddc36"
++    },
++    {
++      "path": "submodules/TgVoipWebrtc/tgcalls",
++      "commit": "8d6dd4c61e62965cb574c29e39327a4686066381"
++    },
++    {
++      "path": "submodules/rlottie/rlottie",
++      "commit": "53c9679069eb6b6513ccc3c892ef4f4a760658da"
++    },
++    {
++      "path": "submodules/tlottie/tlottie",
++      "commit": "92df98dc209bc39b1e567ec74a8c86a0af5239de"
++    },
++    {
++      "path": "third-party/dav1d/dav1d",
++      "commit": "330e20672e85f9de1678dccd6957845898ef57a1"
++    },
++    {
++      "path": "third-party/libvpx/libvpx",
++      "commit": "e7bfd8b6c230a6824e7fd1efa2378a7322986128"
++    },
++    {
++      "path": "third-party/mtproto-engine",
++      "commit": "da4b2170210aab0430c4ff18c032991f3030cf45"
++    },
++    {
++      "path": "third-party/td/td",
++      "commit": "e894536b2f46caad93f997448d2daff9431b19dd"
++    },
++    {
++      "path": "third-party/wallet-engine/wallet-engine",
++      "commit": "e59e0d89d7ee90c388bf36e3334c5b276f396697"
++    },
++    {
++      "path": "third-party/webrtc/webrtc",
++      "commit": "6513c71d6c80311d69a0a6b9c09fcf32cfbeb247"
++    }
++  ],
++  "native_compilation_verified": false,
++  "device_ui_verified": false,
++  "virtual_gifts_ported": false
++}
+diff --git a/NativePreview/Tests/main.swift b/NativePreview/Tests/main.swift
+new file mode 100644
+--- /dev/null
++++ b/NativePreview/Tests/main.swift
+@@ -0,0 +1,51 @@
++import Foundation
++
++var checks = 0
++func check(_ condition: @autoclosure () -> Bool, _ message: String) {
++    precondition(condition(), message)
++    checks += 1
++}
++
++for name in ["payments.getPaymentForm", "payments.getPaymentFormX", "payments.sendStarsForm", "payments.sendPaymentForm", "payments.sendStarsGift", "payments.transferStarGift", "payments.convertStarGift", "payments.upgradeStarGift", "payments.updateStarGiftPrice", "payments.refundStarsCharge", "payments.assignAppStoreTransaction", "payments.changeStarsSubscription", "payments.newUnrecognizedMutation", "messages.sendPaidReaction", "phone.joinGroupCallStars"] {
++    check(LocalDemoPolicy.blocks(functionName: name), "Must block financial mutation: \(name)")
++}
++for name in ["payments.getStarsStatus", "payments.getStarsTransactions", "payments.getStarGifts", "payments.getResaleStarGifts", "payments.getSavedStarGifts", "payments.checkGiftCode", "payments.searchStarGifts", "payments.resolveStarGiftOffer", "auth.sendCode", "auth.signIn", "users.getFullUser", "messages.getHistory", "messages.sendMessage", "messages.sendMedia", "messages.forwardMessages", "account.updateEmojiStatus"] {
++    check(!LocalDemoPolicy.blocks(functionName: name), "Must preserve ordinary/read-only request: \(name)")
++}
++check(LocalDemoPolicy.blocks(functionName: "messages.sendMessage", paidStars: 1), "Paid messages blocked")
++check(LocalDemoPolicy.blocks(functionName: "messages.sendMedia", paidStars: 100), "Paid media blocked")
++check(!LocalDemoPolicy.blocks(functionName: "messages.sendMessage", paidStars: 0), "Free message preserved")
++
++let suiteName = "stargram.native.policy.test." + UUID().uuidString
++let defaults = UserDefaults(suiteName: suiteName)!
++check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 9_999_999, "Default local balance")
++check(LocalDemoBalanceStore.add(accountId: 1, amount: 1, defaults: defaults) == 10_000_000, "Local credit")
++check(LocalDemoBalanceStore.balance(accountId: 2, defaults: defaults) == 9_999_999, "Accounts isolated")
++check(LocalDemoBalanceStore.balance(accountId: 1, defaults: UserDefaults(suiteName: suiteName)!) == 10_000_000, "Balance persists")
++check(LocalDemoBalanceStore.add(accountId: 1, amount: Int64.max, defaults: defaults) == LocalDemoPolicy.maximumStarsBalance, "Positive overflow bounded")
++check(LocalDemoBalanceStore.add(accountId: 1, amount: Int64.min, defaults: defaults) == 0, "Negative balance bounded")
++check(LocalDemoBalanceStore.add(accountId: 1, amount: -1, defaults: defaults) == 0, "No negative balance")
++check(LocalDemoBalanceStore.add(accountId: 1, amount: 5, defaults: defaults) == 5, "Store remains usable")
++defaults.removePersistentDomain(forName: suiteName)
++
++let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("stargram-native-storage-test-" + UUID().uuidString, isDirectory: true)
++let preservedGroup = scratch.appendingPathComponent("existing-group", isDirectory: true)
++let grouped = try NativePreviewStorage.resolve(groupURL: preservedGroup, privateRootURL: scratch, allowPrivateContainer: true)
++check(grouped.url == preservedGroup && !grouped.usesPrivateContainer, "An existing group container is preserved")
++check(!FileManager.default.fileExists(atPath: scratch.path), "Resolving a group never writes to it")
++do {
++    _ = try NativePreviewStorage.resolve(groupURL: nil, privateRootURL: scratch, allowPrivateContainer: false)
++    preconditionFailure("Private fallback must require explicit preview mode")
++} catch {
++    checks += 1
++}
++let standalone = try NativePreviewStorage.resolve(groupURL: nil, privateRootURL: scratch, allowPrivateContainer: true)
++check(standalone.usesPrivateContainer && standalone.url.lastPathComponent == "StargramNative", "Standalone container stays under the app's private root")
++check(standalone.url.deletingLastPathComponent().standardizedFileURL == scratch.standardizedFileURL, "No path outside the private root")
++try Data("fixture".utf8).write(to: standalone.url.appendingPathComponent("fixture"))
++let reopened = try NativePreviewStorage.resolve(groupURL: nil, privateRootURL: scratch, allowPrivateContainer: true)
++let reopenedFixture = try String(contentsOf: reopened.url.appendingPathComponent("fixture"), encoding: .utf8)
++check(reopenedFixture == "fixture", "Relaunch preserves the existing private container")
++precondition(scratch.lastPathComponent.hasPrefix("stargram-native-storage-test-") && scratch.deletingLastPathComponent().standardizedFileURL == FileManager.default.temporaryDirectory.standardizedFileURL)
++try FileManager.default.removeItem(at: scratch)
++print("PASS: \(checks) native policy and local-balance checks; no network or account data used")
