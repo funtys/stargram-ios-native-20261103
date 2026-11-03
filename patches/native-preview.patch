@@ -29,13 +29,13 @@ diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift b/sub
 new file mode 100644
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,115 @@
 +import Foundation
 +
 +/// Device-only preview settings. These values never grant server-side entitlements.
 +public enum LocalDemoPolicy {
 +    public static let isEnabled = true
-+    public static let paymentErrorDescription = "LOCAL_DEMO_PAYMENTS_DISABLED"
++    public static let paymentErrorDescription = "LOCAL_PAYMENTS_DISABLED"
 +    public static let defaultStarsBalance: Int64 = 9_999_999
 +    public static let maximumStarsBalance: Int64 = 1_000_000_000_000
 +
@@ -87,50 +87,62 @@ new file mode 100644
 +        let balance: Int64
 +        let receipts: [Receipt]
 +    }
++    static let didChange = Notification.Name("StargramLocalBalanceChanged")
 +    private static let lock = NSRecursiveLock()
 +
-+    private static func key(accountId: Int64) -> String {
-+        return "stargram.native.demo.stars.\(accountId)"
++    private static func key(accountId: Int64, ton: Bool = false) -> String {
++        return "stargram.native.demo.stars.\(accountId)" + (ton ? ".ton" : "")
 +    }
-+    private static func ledger(accountId: Int64, defaults: UserDefaults) -> Ledger {
-+        if let data = defaults.data(forKey: self.key(accountId: accountId) + ".ledger"),
++    private static func ledger(accountId: Int64, ton: Bool = false, defaults: UserDefaults) -> Ledger {
++        if let data = defaults.data(forKey: self.key(accountId: accountId, ton: ton) + ".ledger"),
 +           let value = try? JSONDecoder().decode(Ledger.self, from: data) {
 +            return value
 +        }
-+        let legacy = (defaults.object(forKey: self.key(accountId: accountId)) as? NSNumber)?.int64Value ?? LocalDemoPolicy.defaultStarsBalance
-+        return Ledger(balance: min(LocalDemoPolicy.maximumStarsBalance, max(0, legacy)), receipts: [])
++        let legacy = (defaults.object(forKey: self.key(accountId: accountId, ton: ton)) as? NSNumber)?.int64Value ?? (ton ? 0 : LocalDemoPolicy.defaultStarsBalance)
++        return Ledger(balance: min(ton ? 1_000_000_000_000_000_000 : LocalDemoPolicy.maximumStarsBalance, max(0, legacy)), receipts: [])
 +    }
-+    static func balance(accountId: Int64, defaults: UserDefaults = .standard) -> Int64 {
++    static func balance(accountId: Int64, ton: Bool = false, defaults: UserDefaults = .standard) -> Int64 {
 +        self.lock.lock()
 +        defer { self.lock.unlock() }
-+        return self.ledger(accountId: accountId, defaults: defaults).balance
++        return self.ledger(accountId: accountId, ton: ton, defaults: defaults).balance
 +    }
-+    static func receipts(accountId: Int64, defaults: UserDefaults = .standard) -> [Receipt] {
++    static func receipts(accountId: Int64, ton: Bool = false, defaults: UserDefaults = .standard) -> [Receipt] {
 +        self.lock.lock()
 +        defer { self.lock.unlock() }
-+        return self.ledger(accountId: accountId, defaults: defaults).receipts.reversed()
++        return self.ledger(accountId: accountId, ton: ton, defaults: defaults).receipts.reversed()
 +    }
 +    @discardableResult
-+    static func set(accountId: Int64, amount: Int64, defaults: UserDefaults = .standard) -> Int64 {
++    static func set(accountId: Int64, amount: Int64, ton: Bool = false, defaults: UserDefaults = .standard) -> Int64 {
 +        self.lock.lock()
 +        defer { self.lock.unlock() }
-+        let old = self.ledger(accountId: accountId, defaults: defaults)
-+        let bounded = min(LocalDemoPolicy.maximumStarsBalance, max(0, amount))
++        let old = self.ledger(accountId: accountId, ton: ton, defaults: defaults)
++        let bounded = min(ton ? 1_000_000_000_000_000_000 : LocalDemoPolicy.maximumStarsBalance, max(0, amount))
 +        let delta = bounded - old.balance
 +        guard delta != 0 else { return bounded }
 +        var receipts = old.receipts
 +        receipts.append(Receipt(id: "local-demo-" + UUID().uuidString, amount: delta, date: Int32(Date().timeIntervalSince1970)))
 +        let ledger = Ledger(balance: bounded, receipts: receipts)
 +        guard let data = try? JSONEncoder().encode(ledger) else { return old.balance }
-+        defaults.set(data, forKey: self.key(accountId: accountId) + ".ledger")
++        defaults.set(data, forKey: self.key(accountId: accountId, ton: ton) + ".ledger")
++        NotificationCenter.default.post(name: self.didChange, object: nil, userInfo: ["accountId": accountId])
 +        return bounded
 +    }
-+    static func add(accountId: Int64, amount: Int64, defaults: UserDefaults = .standard) -> Int64 {
++    static func removeReceipt(accountId: Int64, id: String, ton: Bool = false, defaults: UserDefaults = .standard) {
++        guard id.hasPrefix("local-demo-") else { return }
 +        self.lock.lock()
 +        defer { self.lock.unlock() }
-+        let current = self.balance(accountId: accountId, defaults: defaults)
++        let old = self.ledger(accountId: accountId, ton: ton, defaults: defaults)
++        let ledger = Ledger(balance: old.balance, receipts: old.receipts.filter { $0.id != id })
++        guard let data = try? JSONEncoder().encode(ledger) else { return }
++        defaults.set(data, forKey: self.key(accountId: accountId, ton: ton) + ".ledger")
++        NotificationCenter.default.post(name: self.didChange, object: nil, userInfo: ["accountId": accountId])
++    }
++    static func add(accountId: Int64, amount: Int64, ton: Bool = false, defaults: UserDefaults = .standard) -> Int64 {
++        self.lock.lock()
++        defer { self.lock.unlock() }
++        let current = self.balance(accountId: accountId, ton: ton, defaults: defaults)
 +        let (sum, overflow) = current.addingReportingOverflow(amount)
-+        return self.set(accountId: accountId, amount: overflow ? (amount > 0 ? LocalDemoPolicy.maximumStarsBalance : 0) : sum, defaults: defaults)
++        return self.set(accountId: accountId, amount: overflow ? (amount > 0 ? (ton ? 1_000_000_000_000_000_000 : LocalDemoPolicy.maximumStarsBalance) : 0) : sum, ton: ton, defaults: defaults)
 +    }
 +}
 diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift b/submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift
@@ -243,21 +255,21 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      case generic
  }
  
-+private func localDemoTransactions(accountId: Int64, mode: StarsTransactionsContext.Mode = .all) -> [StarsContext.State.Transaction] {
-+    return LocalDemoBalanceStore.receipts(accountId: accountId).filter { receipt in
++private func localDemoTransactions(accountId: Int64, ton: Bool = false, mode: StarsTransactionsContext.Mode = .all) -> [StarsContext.State.Transaction] {
++    return LocalDemoBalanceStore.receipts(accountId: accountId, ton: ton).filter { receipt in
 +        switch mode {
 +        case .all: return true
 +        case .incoming: return receipt.amount > 0
 +        case .outgoing: return receipt.amount < 0
 +        }
 +    }.map { receipt in
-+        return StarsContext.State.Transaction(flags: [.isLocal], id: receipt.id, count: CurrencyAmount(amount: StarsAmount(value: receipt.amount, nanos: 0), currency: .stars), date: receipt.date, peer: receipt.amount > 0 ? .appStore : .unsupported, title: nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil, paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil, starGift: nil, floodskipNumber: nil, starrefCommissionPermille: nil, starrefPeerId: nil, starrefAmount: nil, paidMessageCount: nil, premiumGiftMonths: nil, adsProceedsFromDate: nil, adsProceedsToDate: nil)
++        return StarsContext.State.Transaction(flags: [.isLocal], id: receipt.id, count: CurrencyAmount(amount: StarsAmount(value: receipt.amount, nanos: 0), currency: ton ? .ton : .stars), date: receipt.date, peer: ton ? .fragment : receipt.amount > 0 ? .appStore : .unsupported, title: nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil, paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil, starGift: nil, floodskipNumber: nil, starrefCommissionPermille: nil, starrefPeerId: nil, starrefAmount: nil, paidMessageCount: nil, premiumGiftMonths: nil, adsProceedsFromDate: nil, adsProceedsToDate: nil)
 +    }
 +}
 +
  private func _internal_requestStarsState(account: Account, peerId: EnginePeer.Id, ton: Bool, mode: StarsTransactionsContext.Mode, subscriptionId: String?, offset: String?, limit: Int32) -> Signal<InternalStarsStatus, RequestStarsStateError> {
-+    if LocalDemoPolicy.isEnabled && !ton && peerId == account.peerId {
-+        return .single(InternalStarsStatus(balance: StarsAmount(value: LocalDemoBalanceStore.balance(accountId: peerId.toInt64()), nanos: 0), subscriptionsMissingBalance: nil, subscriptions: [], nextSubscriptionsOffset: nil, transactions: localDemoTransactions(accountId: peerId.toInt64(), mode: mode), nextTransactionsOffset: nil))
++    if LocalDemoPolicy.isEnabled && peerId == account.peerId {
++        return .single(InternalStarsStatus(balance: StarsAmount(value: LocalDemoBalanceStore.balance(accountId: peerId.toInt64(), ton: ton), nanos: 0), subscriptionsMissingBalance: nil, subscriptions: [], nextSubscriptionsOffset: nil, transactions: localDemoTransactions(accountId: peerId.toInt64(), ton: ton, mode: mode), nextTransactionsOffset: nil))
 +    }
      return account.postbox.transaction { transaction -> Peer? in
          return transaction.getPeer(peerId)
@@ -272,50 +284,74 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      return account.postbox.transaction { transaction -> Peer? in
          return transaction.getPeer(peerId)
      }
-@@ -585,6 +603,9 @@
+@@ -567,6 +585,7 @@
+     
+     private let disposable = MetaDisposable()
+     private var updateDisposable: Disposable?
++    private var localDemoObserver: NSObjectProtocol?
+     
+     init(account: Account, ton: Bool) {
+         assert(Queue.mainQueue().isCurrent())
+@@ -579,12 +598,19 @@
+         self._statePromise.set(.single(nil))
+         
+         self.load(force: true)
++        self.localDemoObserver = NotificationCenter.default.addObserver(forName: LocalDemoBalanceStore.didChange, object: nil, queue: .main) { [weak self] notice in
++            guard let self, notice.userInfo?["accountId"] as? Int64 == self.peerId.toInt64() else { return }
++            self.load(force: true)
++        }
+         
+         self.updateDisposable = ((ton ? account.stateManager.updatedTonBalance() : account.stateManager.updatedStarsBalance())
+         |> deliverOnMainQueue).startStrict(next: { [weak self] balances in
              guard let self, let state = self._state, let balance = balances[self.peerId] else {
                  return
              }
-+            if LocalDemoPolicy.isEnabled && !self.ton {
++            if LocalDemoPolicy.isEnabled {
 +                return
 +            }
              self.updateState(StarsContext.State(flags: [], balance: balance, subscriptions: state.subscriptions, canLoadMoreSubscriptions: state.canLoadMoreSubscriptions, transactions: state.transactions, canLoadMoreTransactions: state.canLoadMoreTransactions, isLoading: false))
              self.load(force: true)
          })
-@@ -599,6 +620,12 @@
+@@ -594,11 +620,18 @@
+         assert(Queue.mainQueue().isCurrent())
+         self.disposable.dispose()
+         self.updateDisposable?.dispose()
++        if let observer = self.localDemoObserver { NotificationCenter.default.removeObserver(observer) }
+     }
+     
      private var previousLoadTimestamp: Double?
      func load(force: Bool) {
          assert(Queue.mainQueue().isCurrent())
 +
-+        if LocalDemoPolicy.isEnabled && !self.ton {
-+            let balance = StarsAmount(value: LocalDemoBalanceStore.balance(accountId: self.peerId.toInt64()), nanos: 0)
-+            self.updateState(StarsContext.State(flags: [], balance: balance, subscriptions: [], canLoadMoreSubscriptions: false, transactions: localDemoTransactions(accountId: self.peerId.toInt64()), canLoadMoreTransactions: false, isLoading: false))
++        if LocalDemoPolicy.isEnabled {
++            let balance = StarsAmount(value: LocalDemoBalanceStore.balance(accountId: self.peerId.toInt64(), ton: self.ton), nanos: 0)
++            self.updateState(StarsContext.State(flags: [], balance: balance, subscriptions: [], canLoadMoreSubscriptions: false, transactions: localDemoTransactions(accountId: self.peerId.toInt64(), ton: self.ton), canLoadMoreTransactions: false, isLoading: false))
 +            return
 +        }
          
          let currentTimestamp = CFAbsoluteTimeGetCurrent()
          if let previousLoadTimestamp = self.previousLoadTimestamp, currentTimestamp - previousLoadTimestamp < 60 && !force {
-@@ -623,6 +650,11 @@
+@@ -623,6 +656,11 @@
      }
      
      func add(balance: StarsAmount, addTransaction: Bool) {
-+        if LocalDemoPolicy.isEnabled && !self.ton {
-+            _ = LocalDemoBalanceStore.add(accountId: self.peerId.toInt64(), amount: balance.value)
++        if LocalDemoPolicy.isEnabled {
++            _ = LocalDemoBalanceStore.add(accountId: self.peerId.toInt64(), amount: balance.value, ton: self.ton)
 +            self.load(force: true)
 +            return
 +        }
          guard let state = self._state else {
              return
          }
-@@ -631,10 +663,21 @@
+@@ -631,10 +669,21 @@
              let count =  CurrencyAmount(amount: balance, currency: self.ton ? .ton : .stars)
              transactions.insert(.init(flags: [.isLocal], id: "\(arc4random())", count: count, date: Int32(Date().timeIntervalSince1970), peer: .appStore, title: nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil, paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil, starGift: nil, floodskipNumber: nil, starrefCommissionPermille: nil, starrefPeerId: nil, starrefAmount: nil, paidMessageCount: nil, premiumGiftMonths: nil, adsProceedsFromDate: nil, adsProceedsToDate: nil), at: 0)
          }
 -        self.updateState(StarsContext.State(flags: [.isPendingBalance], balance: max(StarsAmount(value: 0, nanos: 0), state.balance + balance), subscriptions: state.subscriptions, canLoadMoreSubscriptions: state.canLoadMoreSubscriptions, transactions: transactions, canLoadMoreTransactions: state.canLoadMoreTransactions, isLoading: state.isLoading))
-+        let localDemo = LocalDemoPolicy.isEnabled && !self.ton
++        let localDemo = LocalDemoPolicy.isEnabled
 +        let updatedBalance: StarsAmount
 +        if localDemo {
-+            updatedBalance = StarsAmount(value: LocalDemoBalanceStore.add(accountId: self.peerId.toInt64(), amount: balance.value), nanos: 0)
++            updatedBalance = StarsAmount(value: LocalDemoBalanceStore.add(accountId: self.peerId.toInt64(), amount: balance.value, ton: self.ton), nanos: 0)
 +        } else {
 +            updatedBalance = max(StarsAmount(value: 0, nanos: 0), state.balance + balance)
 +        }
@@ -323,21 +359,21 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      }
      
      fileprivate func updateBalance(_ balance: StarsAmount, transactions: [StarsContext.State.Transaction]?) {
-+        if LocalDemoPolicy.isEnabled && !self.ton {
++        if LocalDemoPolicy.isEnabled {
 +            self.load(force: true)
 +            return
 +        }
          guard let state = self._state else {
              return
          }
-@@ -1132,6 +1175,14 @@
+@@ -1132,6 +1181,14 @@
          return state
      }
      
 +    public func setLocalDemoBalance(_ balance: Int64) {
-+        guard LocalDemoPolicy.isEnabled && !self.ton else { return }
++        guard LocalDemoPolicy.isEnabled else { return }
 +        self.impl.with { impl in
-+            _ = LocalDemoBalanceStore.set(accountId: impl.peerId.toInt64(), amount: balance)
++            _ = LocalDemoBalanceStore.set(accountId: impl.peerId.toInt64(), amount: balance, ton: impl.ton)
 +            impl.load(force: true)
 +        }
 +    }
@@ -345,6 +381,43 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      public func add(balance: StarsAmount, addTransaction: Bool = true) {
          self.impl.with {
              $0.add(balance: balance, addTransaction: addTransaction)
+@@ -1241,6 +1298,10 @@
+                     filteredTransactions = currentTransactions.filter { $0.count.amount < StarsAmount.zero }
+                 }
+                 
++                if LocalDemoPolicy.isEnabled {
++                    self.updateState(StarsTransactionsContext.State(transactions: filteredTransactions, canLoadMore: false, isLoading: false))
++                    return
++                }
+                 if !filteredTransactions.isEmpty && self._state.transactions.isEmpty  && filteredTransactions != initialTransactions {
+                     var updatedState = self._state
+                     updatedState.transactions.removeAll(where: { $0.flags.contains(.isLocal) })
+@@ -1268,6 +1329,10 @@
+                     filteredTransactions = currentTransactions.filter { $0.count.amount < StarsAmount.zero }
+                 }
+                 
++                if LocalDemoPolicy.isEnabled {
++                    self.updateState(StarsTransactionsContext.State(transactions: filteredTransactions, canLoadMore: false, isLoading: false))
++                    return
++                }
+                 if filteredTransactions != initialTransactions {
+                     var existingIds = Set<String>()
+                     for transaction in self._state.transactions {
+@@ -1384,6 +1449,14 @@
+         return state
+     }
+     
++    public func removeLocalTransaction(_ id: String) {
++        guard LocalDemoPolicy.isEnabled else { return }
++        self.impl.with { impl in
++            LocalDemoBalanceStore.removeReceipt(accountId: impl.peerId.toInt64(), id: id, ton: impl.ton)
++            impl.loadMore(reload: true)
++        }
++    }
++
+     public func reload() {
+         self.impl.with {
+             $0.loadMore(reload: true)
 diff --git a/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift b/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
 --- a/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
 +++ b/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
@@ -361,7 +434,7 @@ diff --git a/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift 
 diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift
 --- a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift
 +++ b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift
-@@ -191,6 +191,26 @@
+@@ -191,6 +191,31 @@
          required init?(coder: NSCoder) {
              fatalError("init(coder:) has not been implemented")
          }
@@ -369,18 +442,23 @@ diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sour
 +        @objc private func editLocalBalance(_ gesture: UITapGestureRecognizer) {
 +            guard gesture.state == .ended, gesture.location(in: gesture.view).y < 112.0,
 +                  LocalDemoPolicy.isEnabled, let component = self.component,
-+                  !component.starsContext.ton, let controller = self.controller?() else { return }
++                  let controller = self.controller?() else { return }
 +            let presentationData = component.context.sharedContext.currentPresentationData.with { $0 }
-+            let alert = UIAlertController(title: "Демо-баланс", message: "Изменение видно только на этом устройстве", preferredStyle: .alert)
++            let alert = UIAlertController(title: "Изменить баланс", message: "Изменение видно только на этом устройстве", preferredStyle: .alert)
 +            alert.overrideUserInterfaceStyle = presentationData.theme.overallDarkAppearance ? .dark : .light
 +            alert.addTextField { field in
-+                field.keyboardType = .numberPad
-+                field.text = String(component.starsContext.currentState?.balance.value ?? 0)
++                let balance = component.starsContext.currentState?.balance.value ?? 0
++                field.keyboardType = component.starsContext.ton ? .decimalPad : .numberPad
++                field.text = component.starsContext.ton ? NSDecimalNumber(value: balance).dividing(by: NSDecimalNumber(value: 1_000_000_000)).stringValue : String(balance)
 +            }
 +            alert.addAction(UIAlertAction(title: presentationData.strings.Common_Cancel, style: .cancel))
 +            alert.addAction(UIAlertAction(title: presentationData.strings.Common_Save, style: .default, handler: { [weak alert] _ in
-+                guard let text = alert?.textFields?.first?.text, let value = Int64(text),
-+                      value >= 0, value <= LocalDemoPolicy.maximumStarsBalance else { return }
++                guard let text = alert?.textFields?.first?.text else { return }
++                let number = NSDecimalNumber(string: text.replacingOccurrences(of: ",", with: "."))
++                let scaled = component.starsContext.ton ? number.multiplying(by: NSDecimalNumber(value: 1_000_000_000)) : number
++                let value = scaled.int64Value
++                guard scaled == NSDecimalNumber(value: value), value >= 0,
++                      value <= (component.starsContext.ton ? 1_000_000_000_000_000_000 : LocalDemoPolicy.maximumStarsBalance) else { return }
 +                component.starsContext.setLocalDemoBalance(value)
 +            }))
 +            controller.present(alert, animated: true)
@@ -388,16 +466,7 @@ diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sour
          
          deinit {
              self.stateDisposable?.dispose()
-@@ -536,7 +556,7 @@
-                 titleString = environment.strings.Stars_Ton_Title
-                 descriptionString = environment.strings.Stars_Ton_Description
-             } else {
--                titleString = environment.strings.Stars_Intro_Title
-+                titleString = environment.strings.Stars_Intro_Title + (LocalDemoPolicy.isEnabled ? " · Демо" : "")
-                 descriptionString = environment.strings.Stars_Intro_Description
-             }
-                        
-@@ -834,6 +854,10 @@
+@@ -834,6 +859,10 @@
              if let balanceView = self.balanceView.view {
                  if balanceView.superview == nil {
                      self.scrollView.addSubview(balanceView)
@@ -408,6 +477,57 @@ diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sour
                  }
                  starTransition.setFrame(view: balanceView, frame: balanceFrame)
              }
+diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsListPanelComponent.swift b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsListPanelComponent.swift
+--- a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsListPanelComponent.swift
++++ b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsListPanelComponent.swift
+@@ -19,6 +19,10 @@
+ import GiftAnimationComponent
+ import TelegramStringFormatting
+ 
++private final class LocalReceiptLongPress: UILongPressGestureRecognizer {
++    var transactionId = ""
++}
++
+ private extension StarsContext.State.Transaction {
+     var extendedId: String {
+         if self.count.amount > StarsAmount.zero {
+@@ -176,6 +180,21 @@
+         
+         required init?(coder: NSCoder) {
+             fatalError("init(coder:) has not been implemented")
++        }
++
++        @objc private func removeLocalReceipt(_ gesture: LocalReceiptLongPress) {
++            guard gesture.state == .began, LocalDemoPolicy.isEnabled,
++                  let component = self.component, let environment = self.environment else { return }
++            var responder: UIResponder? = self
++            while let current = responder, !(current is UIViewController) { responder = current.next }
++            guard let controller = responder as? UIViewController else { return }
++            let alert = UIAlertController(title: "Удалить операцию?", message: "Запись будет удалена из истории. Баланс не изменится.", preferredStyle: .alert)
++            alert.overrideUserInterfaceStyle = environment.theme.overallDarkAppearance ? .dark : .light
++            alert.addAction(UIAlertAction(title: environment.strings.Common_Cancel, style: .cancel))
++            alert.addAction(UIAlertAction(title: environment.strings.Common_Delete, style: .destructive, handler: { _ in
++                component.transactionsContext.removeLocalTransaction(gesture.transactionId)
++            }))
++            controller.present(alert, animated: true)
+         }
+         
+         deinit {
+@@ -591,6 +610,14 @@
+                     )
+                     let itemFrame = itemLayout.itemFrame(for: index).offsetBy(dx: itemLayout.containerInsets.left, dy: 0.0)
+                     if let itemComponentView = itemView.view {
++                        var longPress = itemComponentView.gestureRecognizers?.first(where: { $0 is LocalReceiptLongPress }) as? LocalReceiptLongPress
++                        if longPress == nil {
++                            let gesture = LocalReceiptLongPress(target: self, action: #selector(self.removeLocalReceipt(_:)))
++                            itemComponentView.addGestureRecognizer(gesture)
++                            longPress = gesture
++                        }
++                        longPress?.transactionId = item.id
++                        longPress?.isEnabled = item.id.hasPrefix("local-demo-")
+                         if itemComponentView.superview == nil {
+                             if !transition.animation.isImmediate {
+                                 transition.animateAlpha(view: itemComponentView, from: 0.0, to: 1.0)
 diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
 --- a/submodules/TelegramUI/Sources/AppDelegate.swift
 +++ b/submodules/TelegramUI/Sources/AppDelegate.swift
@@ -940,7 +1060,7 @@ diff --git a/NativePreview/Tests/main.swift b/NativePreview/Tests/main.swift
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/Tests/main.swift
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,75 @@
 +import Foundation
 +
 +var checks = 0
@@ -986,6 +1106,13 @@ new file mode 100644
 +check(LocalDemoBalanceStore.receipts(accountId: 1, defaults: defaults).count == receiptCount, "No duplicate receipt for unchanged balance")
 +check(LocalDemoBalanceStore.set(accountId: 1, amount: 105, defaults: defaults) == 105, "Manual balance edit")
 +check(LocalDemoBalanceStore.receipts(accountId: 1, defaults: defaults).first?.amount == 100, "Manual increase records only the delta")
++let removedId = LocalDemoBalanceStore.receipts(accountId: 1, defaults: defaults).first!.id
++LocalDemoBalanceStore.removeReceipt(accountId: 1, id: removedId, defaults: defaults)
++check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 105, "Deleting history never changes balance")
++check(!LocalDemoBalanceStore.receipts(accountId: 1, defaults: defaults).contains(where: { $0.id == removedId }), "Deleted receipt stays removed")
++check(LocalDemoBalanceStore.set(accountId: 1, amount: 1250000000, ton: true, defaults: defaults) == 1250000000, "GRAM preserves nanoton precision")
++check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 105, "GRAM never changes Stars")
++check(LocalDemoBalanceStore.receipts(accountId: 1, ton: true, defaults: defaults).first?.amount == 1250000000, "GRAM gets its own credit receipt")
 +defaults.removePersistentDomain(forName: suiteName)
 +
 +let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("stargram-native-storage-test-" + UUID().uuidString, isDirectory: true)

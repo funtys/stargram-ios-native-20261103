@@ -66,7 +66,7 @@
   "native_compilation_verified": false,
   "device_ui_verified": false,
   "virtual_gifts_ported": false,
-  "patch_sha256": "f1ceb52df6f86b150f5c51d865876ef2ccc48c6251caa4e7ece0e54b335e70c9",
+  "patch_sha256": "8dbbf0022a4ffa33797eeeb0515da70aebf38d04e7af34bc46317d110ef30b82",
   "patched_files": [
     ".gitignore",
     "Telegram/Telegram-iOS/InfoBazel.plist",
@@ -78,6 +78,7 @@
     "submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift",
     "submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift",
     "submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift",
+    "submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsListPanelComponent.swift",
     "submodules/TelegramUI/Sources/AppDelegate.swift",
     "submodules/TelegramUI/Sources/NativePreviewStorage.swift",
     "submodules/PasscodeCore/Sources/Passcode.swift",
