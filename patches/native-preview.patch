@@ -120,7 +120,7 @@ new file mode 100644
 +        let delta = bounded - old.balance
 +        guard delta != 0 else { return bounded }
 +        var receipts = old.receipts
-+        receipts.append(Receipt(id: "local-demo-" + UUID().uuidString, amount: delta, date: Int32(Date().timeIntervalSince1970)))
++        receipts.append(Receipt(id: "local-" + UUID().uuidString, amount: delta, date: Int32(Date().timeIntervalSince1970)))
 +        let ledger = Ledger(balance: bounded, receipts: receipts)
 +        guard let data = try? JSONEncoder().encode(ledger) else { return old.balance }
 +        defaults.set(data, forKey: self.key(accountId: accountId, ton: ton) + ".ledger")
@@ -128,7 +128,7 @@ new file mode 100644
 +        return bounded
 +    }
 +    static func removeReceipt(accountId: Int64, id: String, ton: Bool = false, defaults: UserDefaults = .standard) {
-+        guard id.hasPrefix("local-demo-") else { return }
++        guard id.hasPrefix("local-") else { return }
 +        self.lock.lock()
 +        defer { self.lock.unlock() }
 +        let old = self.ledger(accountId: accountId, ton: ton, defaults: defaults)
@@ -579,7 +579,7 @@ diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sour
 +                            longPress = gesture
 +                        }
 +                        longPress?.transactionId = item.id
-+                        longPress?.isEnabled = item.id.hasPrefix("local-demo-")
++                        longPress?.isEnabled = item.id.hasPrefix("local-")
                          if itemComponentView.superview == nil {
                              if !transition.animation.isImmediate {
                                  transition.animateAlpha(view: itemComponentView, from: 0.0, to: 1.0)

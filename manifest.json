@@ -66,7 +66,7 @@
   "native_compilation_verified": false,
   "device_ui_verified": false,
   "virtual_gifts_ported": false,
-  "patch_sha256": "e64cd0b37bc7430906f295aab58f251ee7fffd2af55c2ce58835b89422484dac",
+  "patch_sha256": "12e308a3859a9d0c3365d149a3a9db518b990b0db63e32d1ecd79f3ebae5969f",
   "patched_files": [
     ".gitignore",
     "Telegram/Telegram-iOS/InfoBazel.plist",
