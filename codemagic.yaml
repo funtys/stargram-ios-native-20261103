@@ -1,0 +1,66 @@
+workflows:
+  iphone-unsigned:
+    name: Native iPhone IPA for local signing
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: '27.1'
+      groups:
+        - telegram_api
+      vars:
+        PYTHONUNBUFFERED: '1'
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/source/NativePreview/.cache/repository
+    scripts:
+      - name: Verify pinned source and host
+        script: |
+          set -e
+          xcodebuild -version
+          python3 Bootstrap.py --check-only
+          python3 - <<'PY'
+          import shutil
+          if shutil.disk_usage('.').free < 25 * 1024**3:
+              raise SystemExit('Insufficient disk space for native build')
+          PY
+      - name: Fetch official source and apply preview changes
+        script: python3 Bootstrap.py --destination source
+      - name: Configure API privately
+        script: python3 source/NativePreview/manage.py configure
+      - name: Test policy and compile complete iPhone app
+        script: python3 source/NativePreview/manage.py build --target iphone --unsigned --build-number "$((100001 + ${PROJECT_BUILD_NUMBER:-0}))"
+      - name: Check iPhone architecture and export IPA
+        script: python3 CI/export.py --target iphone --unsigned
+    artifacts:
+      - native-output/Telegram-Native-unsigned.ipa
+      - native-output/verification.json
+      - native-output/INSTALL-IPHONE.md
+
+  simulator:
+    name: Native iPhone simulator preview
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: '27.1'
+      groups:
+        - telegram_api
+      vars:
+        PYTHONUNBUFFERED: '1'
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/source/NativePreview/.cache/repository
+    scripts:
+      - name: Verify source kit
+        script: python3 Bootstrap.py --check-only
+      - name: Fetch official source and apply preview changes
+        script: python3 Bootstrap.py --destination source
+      - name: Configure API privately
+        script: python3 source/NativePreview/manage.py configure
+      - name: Test policy and compile complete simulator app
+        script: python3 source/NativePreview/manage.py build --target simulator --build-number "$((100001 + ${PROJECT_BUILD_NUMBER:-0}))"
+      - name: Export simulator app and capture first launch
+        script: python3 CI/export.py --target simulator
+    artifacts:
+      - native-output/Telegram-Native-Simulator.app.zip
+      - native-output/verification.json
+      - native-output/screens/**
