@@ -29,7 +29,7 @@ diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift b/sub
 new file mode 100644
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,72 @@
 +import Foundation
 +
 +/// Device-only preview settings. These values never grant server-side entitlements.
@@ -38,6 +38,25 @@ new file mode 100644
 +    public static let paymentErrorDescription = "LOCAL_DEMO_PAYMENTS_DISABLED"
 +    public static let defaultStarsBalance: Int64 = 9_999_999
 +    public static let maximumStarsBalance: Int64 = 1_000_000_000_000
++
++    // Metadata may contain a Swift Optional boxed as Any. Unknown non-empty values
++    // must never silently authorize a paid request.
++    static func hasPaidAmount(_ value: Any?, depth: Int = 0) -> Bool {
++        guard let value else {
++            return false
++        }
++        guard depth < 8 else {
++            return true
++        }
++        if let number = value as? NSNumber {
++            return number.compare(NSNumber(value: 0)) != .orderedSame
++        }
++        let mirror = Mirror(reflecting: value)
++        if mirror.displayStyle == .optional {
++            return self.hasPaidAmount(mirror.children.first?.value, depth: depth + 1)
++        }
++        return true
++    }
 +
 +    public static func blocks(functionName: String, paidStars: Int64 = 0) -> Bool {
 +        guard self.isEnabled else {
@@ -99,7 +118,7 @@ new file mode 100644
 +    if description.name.hasPrefix("messages.send") || description.name == "messages.forwardMessages" || description.name.hasPrefix("phone.joinGroupCall") {
 +        for (name, parameter) in description.parameters {
 +            if name == "allowPaidStars" || name == "allow_paid_stars" || name == "paidStars" || name == "paid_stars" {
-+                if let amount = parameter.value as? NSNumber, LocalDemoPolicy.blocks(functionName: description.name, paidStars: amount.int64Value) {
++                if LocalDemoPolicy.hasPaidAmount(parameter.value) {
 +                    return true
 +                }
 +            }
@@ -812,7 +831,7 @@ diff --git a/NativePreview/Tests/main.swift b/NativePreview/Tests/main.swift
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/Tests/main.swift
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,60 @@
 +import Foundation
 +
 +var checks = 0
@@ -830,6 +849,15 @@ new file mode 100644
 +check(LocalDemoPolicy.blocks(functionName: "messages.sendMessage", paidStars: 1), "Paid messages blocked")
 +check(LocalDemoPolicy.blocks(functionName: "messages.sendMedia", paidStars: 100), "Paid media blocked")
 +check(!LocalDemoPolicy.blocks(functionName: "messages.sendMessage", paidStars: 0), "Free message preserved")
++check(!LocalDemoPolicy.hasPaidAmount(nil), "Absent paid amount preserved")
++check(!LocalDemoPolicy.hasPaidAmount(Int64(0)), "Zero paid amount preserved")
++check(LocalDemoPolicy.hasPaidAmount(Int64(1)), "Integer paid amount blocked")
++check(LocalDemoPolicy.hasPaidAmount(UInt64.max), "Unsigned overflow cannot authorize a payment")
++let boxedAbsent: Int64? = nil
++let boxedPaid: Int64? = 2
++check(!LocalDemoPolicy.hasPaidAmount(boxedAbsent as Any), "Boxed nil stays free")
++check(LocalDemoPolicy.hasPaidAmount(boxedPaid as Any), "Boxed paid amount blocked")
++check(LocalDemoPolicy.hasPaidAmount("unknown"), "Unknown metadata fails closed")
 +
 +let suiteName = "stargram.native.policy.test." + UUID().uuidString
 +let defaults = UserDefaults(suiteName: suiteName)!
