@@ -21,7 +21,7 @@ diff --git a/Telegram/Telegram-iOS/InfoBazel.plist b/Telegram/Telegram-iOS/InfoB
  	<string>en</string>
  	<key>CFBundleDisplayName</key>
 -	<string>${APP_NAME}</string>
-+	<string>Telegram · Native</string>
++	<string>Telegram</string>
  	<key>CFBundleExecutable</key>
  	<string>$(EXECUTABLE_NAME)</string>
  	<key>CFBundleIdentifier</key>
