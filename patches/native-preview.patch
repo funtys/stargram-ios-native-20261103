@@ -29,7 +29,7 @@ diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift b/sub
 new file mode 100644
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,172 @@
 +import Foundation
 +
 +/// Device-only preview settings. These values never grant server-side entitlements.
@@ -64,6 +64,7 @@ new file mode 100644
 +        }
 +        if functionName.hasPrefix("payments.") {
 +            let method = String(functionName.dropFirst("payments.".count))
++            if method == "saveStarGift" { return false }
 +            if method.hasPrefix("getPaymentForm") {
 +                return true
 +            }
@@ -1584,7 +1585,7 @@ diff --git a/NativePreview/Tests/main.swift b/NativePreview/Tests/main.swift
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/Tests/main.swift
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,90 @@
 +import Foundation
 +
 +var checks = 0
@@ -1638,6 +1639,7 @@ new file mode 100644
 +check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 105, "GRAM never changes Stars")
 +check(LocalDemoBalanceStore.receipts(accountId: 1, ton: true, defaults: defaults).first?.amount == 1250000000, "GRAM gets its own credit receipt")
 +let fakeGift = LocalDemoBalanceStore.ProfileGift(id: "local-gift-1", peerId: 99, data: Data("visible".utf8))
++check(!LocalDemoPolicy.blocks(functionName: "payments.saveStarGift"), "Profile visibility is separate from financial actions")
 +let fakeReceipt = LocalDemoBalanceStore.Receipt(id: "local-gift-1", amount: -5, date: 1)
 +check(LocalDemoBalanceStore.spend(accountId: 1, price: 5, ton: false, receipt: fakeReceipt, gift: fakeGift, defaults: defaults), "Gift commits balance, receipt and profile atomically")
 +check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 100, "Gift deducts the selected price")
