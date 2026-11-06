@@ -25,7 +25,7 @@ def main():
         command.append("--unsigned")
     subprocess.run(command, check=True)
     if args.target == "iphone":
-        shutil.copyfile(artifact, output / ("Telegram-Native-unsigned.ipa" if args.unsigned else "Telegram-Native.ipa"))
+        shutil.copyfile(artifact, output / "Telegram.ipa")
         shutil.copyfile(ROOT / "INSTALL-IPHONE.md", output / "INSTALL-IPHONE.md")
     else:
         with tempfile.TemporaryDirectory(prefix="stargram-native-simulator-") as temporary:

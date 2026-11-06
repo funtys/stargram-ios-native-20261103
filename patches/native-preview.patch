@@ -13,6 +13,29 @@ diff --git a/.gitignore b/.gitignore
  **/*.pyc
  *.pyc
  submodules/OpusBinding/SharedHeaders/*
+diff --git a/build-system/Make/Make.py b/build-system/Make/Make.py
+--- a/build-system/Make/Make.py
++++ b/build-system/Make/Make.py
+@@ -322,6 +322,9 @@
+         if self.profile_swift:
+             combined_arguments += ['--config=swift_profile']
+ 
++        if self.additional_args:
++            combined_arguments += self.additional_args
++
+         print('TelegramBuild: running')
+         print(subprocess.list2cmdline(combined_arguments))
+         call_executable(combined_arguments)
+@@ -614,6 +617,9 @@
+         override_xcode_version=arguments.overrideXcodeVersion,
+         bazel_user_root=arguments.bazelUserRoot
+     )
++
++    if arguments.bazelArguments:
++        bazel_command_line.add_additional_args(shlex.split(arguments.bazelArguments))
+ 
+     if arguments.lock:
+         bazel_command_line.set_lock(True)
 diff --git a/Telegram/Telegram-iOS/InfoBazel.plist b/Telegram/Telegram-iOS/InfoBazel.plist
 --- a/Telegram/Telegram-iOS/InfoBazel.plist
 +++ b/Telegram/Telegram-iOS/InfoBazel.plist

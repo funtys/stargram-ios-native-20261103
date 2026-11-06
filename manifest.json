@@ -66,9 +66,10 @@
   "native_compilation_verified": false,
   "device_ui_verified": false,
   "virtual_gifts_ported": false,
-  "patch_sha256": "972724587f0b124d9e4c9cf64d02f29ecb2f8bedce21dd3c6ad94eefb21654d1",
+  "patch_sha256": "f3e5fc45ae4cf39c0b6d5f1b57fb3c2069b894ddb6e98d5fff1bb212eabbec5d",
   "patched_files": [
     ".gitignore",
+    "build-system/Make/Make.py",
     "Telegram/Telegram-iOS/InfoBazel.plist",
     "submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift",
     "submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift",

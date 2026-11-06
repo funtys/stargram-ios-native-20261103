@@ -32,7 +32,7 @@ workflows:
       - name: Check iPhone architecture and export IPA
         script: python3 CI/export.py --target iphone --unsigned
     artifacts:
-      - native-output/Telegram-Native-unsigned.ipa
+      - native-output/Telegram.ipa
       - native-output/verification.json
       - native-output/INSTALL-IPHONE.md
 
