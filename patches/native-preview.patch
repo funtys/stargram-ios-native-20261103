@@ -29,7 +29,7 @@ diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift b/sub
 new file mode 100644
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/Network/LocalDemoPolicy.swift
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,171 @@
 +import Foundation
 +
 +/// Device-only preview settings. These values never grant server-side entitlements.
@@ -82,10 +82,20 @@ new file mode 100644
 +        let id: String
 +        let amount: Int64
 +        let date: Int32
++        var peerId: Int64? = nil
++        var gift: Data? = nil
++        var premiumMonths: Int32? = nil
++        var starsGift: Bool? = nil
++    }
++    struct ProfileGift: Codable {
++        let id: String
++        let peerId: Int64
++        var data: Data
 +    }
 +    private struct Ledger: Codable {
 +        let balance: Int64
 +        let receipts: [Receipt]
++        var gifts: [ProfileGift]? = nil
 +    }
 +    static let didChange = Notification.Name("StargramLocalBalanceChanged")
 +    private static let lock = NSRecursiveLock()
@@ -121,7 +131,7 @@ new file mode 100644
 +        guard delta != 0 else { return bounded }
 +        var receipts = old.receipts
 +        receipts.append(Receipt(id: "local-" + UUID().uuidString, amount: delta, date: Int32(Date().timeIntervalSince1970)))
-+        let ledger = Ledger(balance: bounded, receipts: receipts)
++        let ledger = Ledger(balance: bounded, receipts: receipts, gifts: old.gifts)
 +        guard let data = try? JSONEncoder().encode(ledger) else { return old.balance }
 +        defaults.set(data, forKey: self.key(accountId: accountId, ton: ton) + ".ledger")
 +        NotificationCenter.default.post(name: self.didChange, object: nil, userInfo: ["accountId": accountId])
@@ -132,7 +142,7 @@ new file mode 100644
 +        self.lock.lock()
 +        defer { self.lock.unlock() }
 +        let old = self.ledger(accountId: accountId, ton: ton, defaults: defaults)
-+        let ledger = Ledger(balance: old.balance, receipts: old.receipts.filter { $0.id != id })
++        let ledger = Ledger(balance: old.balance, receipts: old.receipts.filter { $0.id != id }, gifts: old.gifts)
 +        guard let data = try? JSONEncoder().encode(ledger) else { return }
 +        defaults.set(data, forKey: self.key(accountId: accountId, ton: ton) + ".ledger")
 +        NotificationCenter.default.post(name: self.didChange, object: nil, userInfo: ["accountId": accountId])
@@ -143,6 +153,52 @@ new file mode 100644
 +        let current = self.balance(accountId: accountId, ton: ton, defaults: defaults)
 +        let (sum, overflow) = current.addingReportingOverflow(amount)
 +        return self.set(accountId: accountId, amount: overflow ? (amount > 0 ? (ton ? 1_000_000_000_000_000_000 : LocalDemoPolicy.maximumStarsBalance) : 0) : sum, ton: ton, defaults: defaults)
++    }
++
++    static func gifts(accountId: Int64, peerId: Int64, defaults: UserDefaults = .standard) -> [ProfileGift] {
++        self.lock.lock()
++        defer { self.lock.unlock() }
++        return [false, true].flatMap { self.ledger(accountId: accountId, ton: $0, defaults: defaults).gifts ?? [] }
++            .filter { $0.peerId == peerId }.reversed()
++    }
++
++    @discardableResult
++    static func spend(accountId: Int64, price: Int64, ton: Bool, receipt: Receipt, gift: ProfileGift?, defaults: UserDefaults = .standard) -> Bool {
++        self.lock.lock()
++        defer { self.lock.unlock() }
++        let old = self.ledger(accountId: accountId, ton: ton, defaults: defaults)
++        guard price >= 0, price <= old.balance, receipt.amount == -price, receipt.id.hasPrefix("local-"), !old.receipts.contains(where: { $0.id == receipt.id }) else { return false }
++        var gifts = old.gifts ?? []
++        if let gift { gifts.append(gift) }
++        let next = Ledger(balance: old.balance - price, receipts: old.receipts + [receipt], gifts: gifts)
++        guard let data = try? JSONEncoder().encode(next) else { return false }
++        defaults.set(data, forKey: self.key(accountId: accountId, ton: ton) + ".ledger")
++        NotificationCenter.default.post(name: self.didChange, object: nil, userInfo: ["accountId": accountId])
++        return true
++    }
++
++    static func updateGift(accountId: Int64, id: String, data: Data, defaults: UserDefaults = .standard) {
++        self.lock.lock()
++        defer { self.lock.unlock() }
++        for ton in [false, true] {
++            var old = self.ledger(accountId: accountId, ton: ton, defaults: defaults)
++            guard let index = old.gifts?.firstIndex(where: { $0.id == id }) else { continue }
++            old.gifts?[index].data = data
++            guard let encoded = try? JSONEncoder().encode(old) else { return }
++            defaults.set(encoded, forKey: self.key(accountId: accountId, ton: ton) + ".ledger")
++            NotificationCenter.default.post(name: self.didChange, object: nil, userInfo: ["accountId": accountId])
++            return
++        }
++    }
++}
++
++public enum LocalPremiumSettings {
++    public static func isEnabled(accountId: Int64) -> Bool {
++        return UserDefaults.standard.double(forKey: "stargram.premium.\(accountId)") > Date().timeIntervalSince1970
++    }
++    public static func enable(accountId: Int64, months: Int32 = 12) {
++        UserDefaults.standard.set(Date().timeIntervalSince1970 + Double(max(1, min(12, months))) * 30 * 86400, forKey: "stargram.premium.\(accountId)")
++        NotificationCenter.default.post(name: LocalDemoBalanceStore.didChange, object: nil, userInfo: ["accountId": accountId])
 +    }
 +}
 diff --git a/submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift b/submodules/TelegramCore/Sources/Network/LocalDemoRequestGuard.swift
@@ -251,7 +307,7 @@ diff --git a/submodules/TelegramCore/Sources/Network/MultiplexedRequestManager.s
 diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift b/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
 --- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
 +++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
-@@ -428,7 +428,22 @@
+@@ -428,7 +428,23 @@
      case generic
  }
  
@@ -263,7 +319,8 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
 +        case .outgoing: return receipt.amount < 0
 +        }
 +    }.map { receipt in
-+        return StarsContext.State.Transaction(flags: [.isLocal], id: receipt.id, count: CurrencyAmount(amount: StarsAmount(value: receipt.amount, nanos: 0), currency: ton ? .ton : .stars), date: receipt.date, peer: ton ? .fragment : receipt.amount > 0 ? .appStore : .unsupported, title: nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil, paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil, starGift: nil, floodskipNumber: nil, starrefCommissionPermille: nil, starrefPeerId: nil, starrefAmount: nil, paidMessageCount: nil, premiumGiftMonths: nil, adsProceedsFromDate: nil, adsProceedsToDate: nil)
++        let gift = receipt.gift.flatMap { try? JSONDecoder().decode(StarGift.self, from: $0) }
++        return StarsContext.State.Transaction(flags: receipt.starsGift == true ? [.isLocal, .isGift] : [.isLocal], id: receipt.id, count: CurrencyAmount(amount: StarsAmount(value: receipt.amount, nanos: 0), currency: ton ? .ton : .stars), date: receipt.date, peer: ton ? .fragment : receipt.amount > 0 ? .appStore : .unsupported, title: gift == nil ? (receipt.premiumMonths != nil ? "Telegram Premium" : receipt.starsGift == true ? "Telegram Stars" : nil) : nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil, paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil, starGift: gift, floodskipNumber: nil, starrefCommissionPermille: nil, starrefPeerId: nil, starrefAmount: nil, paidMessageCount: nil, premiumGiftMonths: receipt.premiumMonths, adsProceedsFromDate: nil, adsProceedsToDate: nil)
 +    }
 +}
 +
@@ -274,7 +331,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      return account.postbox.transaction { transaction -> Peer? in
          return transaction.getPeer(peerId)
      } 
-@@ -503,6 +518,9 @@
+@@ -503,6 +519,9 @@
  }
  
  private func _internal_requestStarsSubscriptions(account: Account, peerId: EnginePeer.Id, offset: String, missingBalance: Bool) -> Signal<InternalStarsStatus, RequestStarsSubscriptionsError> {
@@ -284,7 +341,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      return account.postbox.transaction { transaction -> Peer? in
          return transaction.getPeer(peerId)
      }
-@@ -567,6 +585,7 @@
+@@ -567,6 +586,7 @@
      
      private let disposable = MetaDisposable()
      private var updateDisposable: Disposable?
@@ -292,7 +349,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      
      init(account: Account, ton: Bool) {
          assert(Queue.mainQueue().isCurrent())
-@@ -579,12 +598,19 @@
+@@ -579,12 +599,19 @@
          self._statePromise.set(.single(nil))
          
          self.load(force: true)
@@ -312,7 +369,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
              self.updateState(StarsContext.State(flags: [], balance: balance, subscriptions: state.subscriptions, canLoadMoreSubscriptions: state.canLoadMoreSubscriptions, transactions: state.transactions, canLoadMoreTransactions: state.canLoadMoreTransactions, isLoading: false))
              self.load(force: true)
          })
-@@ -594,11 +620,18 @@
+@@ -594,11 +621,18 @@
          assert(Queue.mainQueue().isCurrent())
          self.disposable.dispose()
          self.updateDisposable?.dispose()
@@ -331,7 +388,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
          
          let currentTimestamp = CFAbsoluteTimeGetCurrent()
          if let previousLoadTimestamp = self.previousLoadTimestamp, currentTimestamp - previousLoadTimestamp < 60 && !force {
-@@ -623,6 +656,11 @@
+@@ -623,6 +657,11 @@
      }
      
      func add(balance: StarsAmount, addTransaction: Bool) {
@@ -343,7 +400,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
          guard let state = self._state else {
              return
          }
-@@ -631,10 +669,21 @@
+@@ -631,10 +670,21 @@
              let count =  CurrencyAmount(amount: balance, currency: self.ton ? .ton : .stars)
              transactions.insert(.init(flags: [.isLocal], id: "\(arc4random())", count: count, date: Int32(Date().timeIntervalSince1970), peer: .appStore, title: nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil, paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil, starGift: nil, floodskipNumber: nil, starrefCommissionPermille: nil, starrefPeerId: nil, starrefAmount: nil, paidMessageCount: nil, premiumGiftMonths: nil, adsProceedsFromDate: nil, adsProceedsToDate: nil), at: 0)
          }
@@ -366,7 +423,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
          guard let state = self._state else {
              return
          }
-@@ -1132,6 +1181,14 @@
+@@ -1132,6 +1182,14 @@
          return state
      }
      
@@ -381,7 +438,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      public func add(balance: StarsAmount, addTransaction: Bool = true) {
          self.impl.with {
              $0.add(balance: balance, addTransaction: addTransaction)
-@@ -1241,6 +1298,10 @@
+@@ -1241,6 +1299,10 @@
                      filteredTransactions = currentTransactions.filter { $0.count.amount < StarsAmount.zero }
                  }
                  
@@ -392,7 +449,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
                  if !filteredTransactions.isEmpty && self._state.transactions.isEmpty  && filteredTransactions != initialTransactions {
                      var updatedState = self._state
                      updatedState.transactions.removeAll(where: { $0.flags.contains(.isLocal) })
-@@ -1268,6 +1329,10 @@
+@@ -1268,6 +1330,10 @@
                      filteredTransactions = currentTransactions.filter { $0.count.amount < StarsAmount.zero }
                  }
                  
@@ -403,7 +460,7 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
                  if filteredTransactions != initialTransactions {
                      var existingIds = Set<String>()
                      for transaction in self._state.transactions {
-@@ -1384,6 +1449,14 @@
+@@ -1384,6 +1450,14 @@
          return state
      }
      
@@ -418,15 +475,410 @@ diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/Stars.swift
      public func reload() {
          self.impl.with {
              $0.loadMore(reload: true)
+@@ -1593,6 +1667,7 @@
+ 
+ 
+ func _internal_sendStarsPaymentForm(account: Account, formId: Int64, source: BotPaymentInvoiceSource) -> Signal<SendBotPaymentResult, SendBotPaymentFormError> {
++    if LocalDemoPolicy.isEnabled && formId < 0 { return localSendGiftPayment(account: account, formId: formId, source: source) }
+     return account.postbox.transaction { transaction -> Api.InputInvoice? in
+         return _internal_parseInputInvoice(transaction: transaction, source: source)
+     }
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/StarGifts.swift b/submodules/TelegramCore/Sources/TelegramEngine/Payments/StarGifts.swift
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/StarGifts.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/StarGifts.swift
+@@ -1468,6 +1468,15 @@
+ }
+ 
+ func _internal_updateStarGiftAddedToProfile(account: Account, reference: StarGiftReference, added: Bool) -> Signal<Never, NoError> {
++    if LocalDemoPolicy.isEnabled, case let .message(messageId) = reference, messageId.namespace == Namespaces.Message.Local {
++        for entry in LocalDemoBalanceStore.gifts(accountId: account.peerId.toInt64(), peerId: messageId.peerId.toInt64()) {
++            if let gift = try? JSONDecoder().decode(ProfileGiftsContext.State.StarGift.self, from: entry.data), gift.reference == reference,
++                let data = try? JSONEncoder().encode(gift.withSavedToProfile(added).withPinnedToTop(false)) {
++                LocalDemoBalanceStore.updateGift(accountId: account.peerId.toInt64(), id: entry.id, data: data)
++            }
++        }
++        return .complete()
++    }
+     var flags: Int32 = 0
+     if !added {
+         flags |= (1 << 0)
+@@ -1967,6 +1976,9 @@
+     private let disposable = MetaDisposable()
+     private let cacheDisposable = MetaDisposable()
+     private let actionDisposable = MetaDisposable()
++    private let localGiftsDisposable = MetaDisposable()
++    private var localGiftsObserver: NSObjectProtocol?
++    private var localGifts: [ProfileGiftsContext.State.StarGift] = []
+     
+     private var sorting: ProfileGiftsContext.Sorting
+     private var filter: ProfileGiftsContext.Filters
+@@ -2004,7 +2016,11 @@
+         self.sorting = sorting
+         self.filter = filter
+         self.limit = limit
+-        
++        self.reloadLocalGifts()
++        self.localGiftsObserver = NotificationCenter.default.addObserver(forName: LocalDemoBalanceStore.didChange, object: nil, queue: nil) { [weak self] notice in
++            guard let self, notice.userInfo?["accountId"] as? Int64 == self.account.peerId.toInt64() else { return }
++            self.queue.async { [weak self] in self?.reloadLocalGifts() }
++        }
+         self.loadMore()
+     }
+     
+@@ -2012,6 +2028,36 @@
+         self.disposable.dispose()
+         self.cacheDisposable.dispose()
+         self.actionDisposable.dispose()
++        self.localGiftsDisposable.dispose()
++        if let observer = self.localGiftsObserver { NotificationCenter.default.removeObserver(observer) }
++    }
++
++    private func reloadLocalGifts() {
++        guard LocalDemoPolicy.isEnabled, self.collectionId == nil else { return }
++        let entries = LocalDemoBalanceStore.gifts(accountId: self.account.peerId.toInt64(), peerId: self.peerId.toInt64())
++        self.localGiftsDisposable.set((self.account.postbox.transaction { transaction -> [ProfileGiftsContext.State.StarGift] in
++            let gifts = entries.compactMap { try? JSONDecoder().decode(ProfileGiftsContext.State.StarGift.self, from: $0.data) }
++            let cache = CachedProfileGifts(gifts: gifts, count: Int32(gifts.count), notificationsEnabled: nil)
++            cache.render(transaction: transaction)
++            return cache.gifts
++        } |> deliverOn(self.queue)).start(next: { [weak self] gifts in
++            self?.localGifts = gifts
++            self?.pushState()
++        }))
++    }
++
++    private func localGiftMatches(_ gift: ProfileGiftsContext.State.StarGift) -> Bool {
++        if !gift.savedToProfile && self.peerId != self.account.peerId { return false }
++        if self.filter == .peerColor {
++            if case let .unique(value) = gift.gift { return value.peerColor != nil }
++            return false
++        }
++        if !self.filter.contains(gift.savedToProfile ? .displayed : .hidden) { return false }
++        switch gift.gift {
++        case .unique: return self.filter.contains(.unique)
++        case let .generic(value):
++            return self.filter.contains(value.availability == nil ? .unlimited : value.upgradeStars != nil ? .limitedUpgradable : .limitedNonUpgradable)
++        }
+     }
+     
+     func reload() {
+@@ -2762,14 +2808,17 @@
+     private func pushState() {
+         let useMainData = (self.filter == .All && self.sorting == .date) || self.filteredCount == nil
+         
+-        let effectiveGifts = useMainData ? self.gifts : self.filteredGifts
+-        let effectiveCount = useMainData ? self.count : self.filteredCount
++        let local = self.localGifts.filter(self.localGiftMatches)
++        let localReferences = Set(self.localGifts.compactMap { $0.reference })
++        let server = (useMainData ? self.gifts : self.filteredGifts).filter { gift in gift.reference.map { !localReferences.contains($0) } ?? true }
++        let effectiveGifts = self.sorting == .date ? (local + server).sorted { $0.date > $1.date } : local + server
++        let effectiveCount = (useMainData ? self.count : self.filteredCount).map { $0 + Int32(local.count) } ?? Int32(effectiveGifts.count)
+         let effectiveDataState = useMainData ? self.dataState : self.filteredDataState
+         
+         let state = ProfileGiftsContext.State(
+             filter: self.filter,
+             sorting: self.sorting,
+-            gifts: self.gifts,
++            gifts: self.localGifts.filter { $0.savedToProfile || self.peerId == self.account.peerId } + self.gifts.filter { gift in gift.reference.map { !localReferences.contains($0) } ?? true },
+             filteredGifts: effectiveGifts,
+             count: effectiveCount,
+             dataState: effectiveDataState,
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/LocalGiftPayments.swift b/submodules/TelegramCore/Sources/TelegramEngine/Payments/LocalGiftPayments.swift
+new file mode 100644
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/LocalGiftPayments.swift
+@@ -0,0 +1,174 @@
++import Foundation
++import Postbox
++import SwiftSignalKit
++internal import TelegramApi
++
++/// Local checkout uses Telegram's message and profile renderers. No payment RPC is sent.
++private struct LocalGiftPaymentPlan {
++    let accountId: Int64
++    let signature: String
++    let peerId: PeerId
++    let price: Int64
++    let ton: Bool
++    let gift: StarGift?
++    let premiumMonths: Int32?
++    let stars: Int64?
++    let text: String?
++    let entities: [MessageTextEntity]?
++    let hideName: Bool
++}
++
++private enum LocalGiftPaymentForms {
++    static let lock = NSLock()
++    static var forms: [Int64: LocalGiftPaymentPlan] = [:]
++
++    static func put(_ plan: LocalGiftPaymentPlan) -> BotPaymentForm {
++        self.lock.lock()
++        defer { self.lock.unlock() }
++        var id = Int64.random(in: Int64.min ... -1)
++        while self.forms[id] != nil { id = Int64.random(in: Int64.min ... -1) }
++        if self.forms.count > 128 { self.forms.removeAll() }
++        self.forms[id] = plan
++        let invoice = BotPaymentInvoice(isTest: true, requestedFields: [], currency: plan.ton ? "TON" : "XTR", prices: [BotPaymentPrice(label: "Gift", amount: plan.price)], tip: nil, termsInfo: nil, subscriptionPeriod: nil)
++        return BotPaymentForm(id: id, canSaveCredentials: false, passwordMissing: false, invoice: invoice, paymentBotId: nil, providerId: nil, url: nil, nativeProvider: nil, savedInfo: nil, savedCredentials: [], additionalPaymentMethods: [])
++    }
++
++    static func take(id: Int64, accountId: Int64, source: BotPaymentInvoiceSource) -> LocalGiftPaymentPlan? {
++        self.lock.lock()
++        defer { self.lock.unlock() }
++        guard let plan = self.forms[id], plan.accountId == accountId, plan.signature == String(reflecting: source) else { return nil }
++        self.forms.removeValue(forKey: id)
++        return plan
++    }
++}
++
++func localGiftPaymentForm(accountPeerId: PeerId, postbox: Postbox, network: Network, source: BotPaymentInvoiceSource) -> Signal<BotPaymentForm, BotPaymentFormRequestError>? {
++    func form(peerId: PeerId, price: Int64, ton: Bool = false, gift: StarGift? = nil, months: Int32? = nil, stars: Int64? = nil, text: String? = nil, entities: [MessageTextEntity]? = nil, hideName: Bool = false) -> BotPaymentForm {
++        return LocalGiftPaymentForms.put(LocalGiftPaymentPlan(accountId: accountPeerId.toInt64(), signature: String(reflecting: source), peerId: peerId, price: price, ton: ton, gift: gift, premiumMonths: months, stars: stars, text: text, entities: entities, hideName: hideName))
++    }
++    switch source {
++    case let .starGift(hideName, includeUpgrade, peerId, giftId, text, entities):
++        return network.request(Api.functions.payments.getStarGifts(hash: 0))
++        |> mapError { _ in BotPaymentFormRequestError.generic }
++        |> mapToSignal { result -> Signal<BotPaymentForm, BotPaymentFormRequestError> in
++            guard case let .starGifts(data) = result,
++                let gift = data.gifts.compactMap({ StarGift(apiStarGift: $0) }).first(where: { if case let .generic(value) = $0 { return value.id == giftId }; return false }),
++                case let .generic(value) = gift else { return .fail(.generic) }
++            let extra = includeUpgrade ? (value.upgradeStars ?? 0) : 0
++            let (price, overflow) = value.price.addingReportingOverflow(extra)
++            guard !overflow, price >= 0 else { return .fail(.generic) }
++            return .single(form(peerId: peerId, price: price, gift: gift, text: text, entities: entities, hideName: hideName))
++        }
++    case let .starGiftResale(slug, peerId, ton, hideName, text, entities):
++        // Always read the selected market variant, never a previously purchased profile copy.
++        return network.request(Api.functions.payments.getUniqueStarGift(slug: slug))
++        |> mapError { _ in BotPaymentFormRequestError.generic }
++        |> mapToSignal { result -> Signal<BotPaymentForm, BotPaymentFormRequestError> in
++            guard case let .uniqueStarGift(data) = result, case let .unique(value) = StarGift(apiStarGift: data.gift),
++                let amount = value.resellAmounts?.first(where: { $0.currency == (ton ? .ton : .stars) }), amount.amount.value >= 0 else { return .fail(.generic) }
++            let owned = StarGift.UniqueGift(id: value.id, giftId: value.giftId, title: value.title, number: value.number, slug: value.slug, owner: .peerId(peerId), attributes: value.attributes, availability: value.availability, giftAddress: nil, resellAmounts: nil, resellForTonOnly: false, releasedBy: value.releasedBy, valueAmount: value.valueAmount, valueCurrency: value.valueCurrency, valueUsdAmount: value.valueUsdAmount, flags: value.flags, themePeerId: value.themePeerId, peerColor: value.peerColor, hostPeerId: nil, minOfferStars: nil, craftChancePermille: value.craftChancePermille)
++            return .single(form(peerId: peerId, price: amount.amount.value, ton: ton, gift: .unique(owned), text: text, entities: entities, hideName: hideName))
++        }
++    case let .premiumGift(peerId, option, text, entities):
++        return .single(form(peerId: peerId, price: option.currency == "XTR" ? option.amount : 0, months: option.months, text: text, entities: entities))
++    case let .giftCode(users, currency, amount, option, text, entities):
++        guard users.count == 1, let peerId = users.first else { return .fail(.generic) }
++        return .single(form(peerId: peerId, price: currency == "XTR" ? amount : 0, months: option.months, text: text, entities: entities))
++    case let .starsGift(peerId, count, _, _):
++        guard count > 0 else { return .fail(.generic) }
++        return .single(form(peerId: peerId, price: count, stars: count))
++    default:
++        return nil
++    }
++}
++
++func localSendGiftPayment(account: Account, formId: Int64, source: BotPaymentInvoiceSource) -> Signal<SendBotPaymentResult, SendBotPaymentFormError> {
++    guard let plan = LocalGiftPaymentForms.take(id: formId, accountId: account.peerId.toInt64(), source: source) else { return .fail(.alreadyPaid) }
++    return account.postbox.transaction { transaction -> SendBotPaymentResult? in
++        guard plan.price >= 0, plan.price <= LocalDemoBalanceStore.balance(accountId: plan.accountId, ton: plan.ton) else { return nil }
++        let date = Int32(Date().timeIntervalSince1970)
++        let receiptId = "local-gift-" + UUID().uuidString
++        let action: TelegramMediaActionType
++        if let gift = plan.gift {
++            if case .unique = gift {
++                action = .starGiftUnique(gift: gift, isUpgrade: false, isTransferred: false, savedToProfile: true, canExportDate: nil, transferStars: nil, isRefunded: false, isPrepaidUpgrade: false, peerId: nil, senderId: nil, savedId: nil, resaleAmount: nil, canTransferDate: nil, canResaleDate: nil, dropOriginalDetailsStars: nil, assigned: false, fromOffer: false, canCraftAt: nil, isCrafted: false, text: plan.text, entities: plan.entities, nameHidden: plan.hideName)
++            } else {
++                action = .starGift(gift: gift, convertStars: nil, text: plan.text, entities: plan.entities, nameHidden: plan.hideName, savedToProfile: true, converted: false, upgraded: false, canUpgrade: false, upgradeStars: nil, isRefunded: false, isPrepaidUpgrade: false, upgradeMessageId: nil, peerId: nil, senderId: nil, savedId: nil, prepaidUpgradeHash: nil, giftMessageId: nil, upgradeSeparate: false, isAuctionAcquired: false, toPeerId: plan.peerId, number: nil)
++            }
++        } else if let months = plan.premiumMonths {
++            action = .giftPremium(currency: "XTR", amount: plan.price, days: max(1, min(12, months)) * 30, cryptoCurrency: nil, cryptoAmount: nil, text: plan.text, entities: plan.entities)
++        } else if let stars = plan.stars {
++            action = .giftStars(currency: "XTR", amount: plan.price, count: stars, cryptoCurrency: nil, cryptoAmount: nil, transactionId: receiptId)
++        } else { return nil }
++
++        let randomId = Int64.random(in: Int64.min ... Int64.max)
++        // A sent local service message is never enqueued to PendingMessageManager.
++        let message = StoreMessage(peerId: plan.peerId, namespace: Namespaces.Message.Local, customStableId: nil, globallyUniqueId: randomId, groupingKey: nil, threadId: nil, timestamp: date, flags: [], tags: [], globalTags: [], localTags: [], forwardInfo: nil, authorId: account.peerId, text: "", attributes: [], media: [TelegramMediaAction(action: action)])
++        let ids = transaction.addMessages([message], location: .Random)
++        guard let messageId = ids[randomId] else { return nil }
++        var saved: ProfileGiftsContext.State.StarGift?
++        if let gift = plan.gift {
++            saved = ProfileGiftsContext.State.StarGift(gift: gift, reference: .message(messageId: messageId), fromPeer: transaction.getPeer(account.peerId).map(EnginePeer.init), date: date, text: plan.text, entities: plan.entities, nameHidden: plan.hideName, savedToProfile: true, pinnedToTop: false, convertStars: nil, canUpgrade: false, canExportDate: nil, upgradeStars: nil, transferStars: nil, canTransferDate: nil, canResaleDate: nil, collectionIds: nil, prepaidUpgradeHash: nil, upgradeSeparate: false, dropOriginalDetailsStars: nil, number: nil, isRefunded: false, canCraftAt: nil)
++        }
++        let savedData = saved.flatMap { try? JSONEncoder().encode($0) }
++        var receipt = LocalDemoBalanceStore.Receipt(id: receiptId, amount: -plan.price, date: date)
++        receipt.peerId = plan.peerId.toInt64()
++        receipt.gift = plan.gift.flatMap { try? JSONEncoder().encode($0) }
++        receipt.premiumMonths = plan.premiumMonths
++        receipt.starsGift = plan.stars != nil
++        let entry = savedData.map { LocalDemoBalanceStore.ProfileGift(id: receiptId, peerId: plan.peerId.toInt64(), data: $0) }
++        guard LocalDemoBalanceStore.spend(accountId: plan.accountId, price: plan.price, ton: plan.ton, receipt: receipt, gift: entry) else {
++            transaction.deleteMessages([messageId], forEachMedia: nil)
++            return nil
++        }
++        if saved != nil {
++            transaction.updatePeerCachedData(peerIds: [plan.peerId], update: { _, data in
++                if let data = data as? CachedUserData { return data.withUpdatedStarGiftsCount(max(1, data.starGiftsCount ?? 0)) }
++                return data
++            })
++        }
++        return .done(receiptMessageId: messageId, subscriptionPeerId: nil, uniqueStarGift: saved)
++    }
++    |> castError(SendBotPaymentFormError.self)
++    |> mapToSignal { result -> Signal<SendBotPaymentResult, SendBotPaymentFormError> in
++        guard let result else { return .fail(.paymentFailed) }
++        return .single(result)
++    }
++}
++
++public func localStorePurchase(account: Account, purpose: AppStoreTransactionPurpose, premiumMonths: Int32) -> Signal<SendBotPaymentResult, SendBotPaymentFormError> {
++    let peerId: PeerId
++    let stars: Int64?
++    let months: Int32?
++    let text: String?
++    let entities: [MessageTextEntity]?
++    switch purpose {
++    case .subscription, .upgrade, .restore:
++        LocalPremiumSettings.enable(accountId: account.peerId.toInt64(), months: premiumMonths)
++        return .single(.done(receiptMessageId: nil, subscriptionPeerId: nil, uniqueStarGift: nil))
++    case .stars:
++        // StarsPurchaseScreen's completion updates StarsContext once and persists its receipt.
++        return .single(.done(receiptMessageId: nil, subscriptionPeerId: nil, uniqueStarGift: nil))
++    case let .starsGift(id, count, _, _):
++        guard count > 0 else { return .fail(.generic) }
++        peerId = id; stars = count; months = nil; text = nil; entities = nil
++    case let .gift(id, _, _):
++        peerId = id; stars = nil; months = premiumMonths; text = nil; entities = nil
++    case let .giftCode(ids, _, _, _, message, messageEntities):
++        guard ids.count == 1, let id = ids.first else { return .fail(.generic) }
++        peerId = id; stars = nil; months = premiumMonths; text = message; entities = messageEntities
++    default:
++        return .fail(.generic)
++    }
++    let source = BotPaymentInvoiceSource.slug("local-store-" + UUID().uuidString)
++    let plan = LocalGiftPaymentPlan(accountId: account.peerId.toInt64(), signature: String(reflecting: source), peerId: peerId, price: stars ?? 0, ton: false, gift: nil, premiumMonths: months, stars: stars, text: text, entities: entities, hideName: false)
++    let form = LocalGiftPaymentForms.put(plan)
++    return localSendGiftPayment(account: account, formId: form.id, source: source)
++}
++
++public func localProfileGiftCount(accountId: Int64, peerId: Int64) -> Int {
++    return LocalDemoBalanceStore.gifts(accountId: accountId, peerId: peerId).filter { entry in
++        guard let gift = try? JSONDecoder().decode(ProfileGiftsContext.State.StarGift.self, from: entry.data) else { return false }
++        return accountId == peerId || gift.savedToProfile
++    }.count
++}
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/BotPaymentForm.swift b/submodules/TelegramCore/Sources/TelegramEngine/Payments/BotPaymentForm.swift
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/BotPaymentForm.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/BotPaymentForm.swift
+@@ -516,6 +516,7 @@
+ }
+ 
+ func _internal_fetchBotPaymentForm(accountPeerId: PeerId, postbox: Postbox, network: Network, source: BotPaymentInvoiceSource, themeParams: [String: Any]?) -> Signal<BotPaymentForm, BotPaymentFormRequestError> {
++    if LocalDemoPolicy.isEnabled, let form = localGiftPaymentForm(accountPeerId: accountPeerId, postbox: postbox, network: network, source: source) { return form }
+     return postbox.transaction { transaction -> Api.InputInvoice? in
+         return _internal_parseInputInvoice(transaction: transaction, source: source)
+     }
+@@ -728,6 +729,7 @@
+ }
+ 
+ func _internal_sendBotPaymentForm(account: Account, formId: Int64, source: BotPaymentInvoiceSource, validatedInfoId: String?, shippingOptionId: String?, tipAmount: Int64?, credentials: BotPaymentCredentials) -> Signal<SendBotPaymentResult, SendBotPaymentFormError> {
++    if LocalDemoPolicy.isEnabled && formId < 0 { return localSendGiftPayment(account: account, formId: formId, source: source) }
+     return account.postbox.transaction { transaction -> Api.InputInvoice? in
+         return _internal_parseInputInvoice(transaction: transaction, source: source)
+     }
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Payments/AppStore.swift b/submodules/TelegramCore/Sources/TelegramEngine/Payments/AppStore.swift
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Payments/AppStore.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Payments/AppStore.swift
+@@ -203,6 +203,13 @@
+ }
+ 
+ func _internal_canPurchasePremium(postbox: Postbox, network: Network, purpose: AppStoreTransactionPurpose) -> Signal<Bool, NoError> {
++    if LocalDemoPolicy.isEnabled {
++        switch purpose {
++        case .subscription, .upgrade, .restore, .stars, .starsGift, .gift: return .single(true)
++        case let .giftCode(ids, _, _, _, _, _): return .single(ids.count == 1)
++        default: return .single(false)
++        }
++    }
+     return apiInputStorePaymentPurpose(postbox: postbox, purpose: purpose)
+     |> mapToSignal { purpose -> Signal<Bool, NoError> in
+         return network.request(Api.functions.payments.canPurchaseStore(purpose: purpose))
+diff --git a/submodules/TelegramCore/Sources/Utils/PeerUtils.swift b/submodules/TelegramCore/Sources/Utils/PeerUtils.swift
+--- a/submodules/TelegramCore/Sources/Utils/PeerUtils.swift
++++ b/submodules/TelegramCore/Sources/Utils/PeerUtils.swift
+@@ -227,7 +227,7 @@
+     var isPremium: Bool {
+         switch self {
+         case let user as TelegramUser:
+-            return user.flags.contains(.isPremium)
++            return user.flags.contains(.isPremium) || LocalPremiumSettings.isEnabled(accountId: user.id.toInt64())
+         default:
+             return false
+         }
+diff --git a/submodules/PremiumUI/Sources/PremiumIntroScreen.swift b/submodules/PremiumUI/Sources/PremiumIntroScreen.swift
+--- a/submodules/PremiumUI/Sources/PremiumIntroScreen.swift
++++ b/submodules/PremiumUI/Sources/PremiumIntroScreen.swift
+@@ -3257,6 +3257,20 @@
+             guard !self.inProgress && !self.purchaseInFlight else {
+                 return
+             }
++            if LocalDemoPolicy.isEnabled, let context = self.screenContext.context {
++                self.present(textAlertController(sharedContext: self.screenContext.sharedContext, title: "Telegram Premium", text: "Включить Premium бесплатно на этом устройстве? Это локальный режим клиента. Подписка аккаунта и серверные лимиты Telegram не изменятся.", actions: [
++                    TextAlertAction(type: .genericAction, title: self.screenContext.presentationData.strings.Common_Cancel, action: {}),
++                    TextAlertAction(type: .defaultAction, title: "Включить", action: { [weak self] in
++                        guard let self else { return }
++                        LocalPremiumSettings.enable(accountId: context.account.peerId.toInt64())
++                        self.isPremium = true
++                        self.justBought = true
++                        self.updated(transition: .easeInOut(duration: 0.25))
++                        self.completion()
++                    })
++                ]))
++                return
++            }
+             
+             let presentationData = self.screenContext.presentationData
+             
+@@ -3881,7 +3895,9 @@
+             if !buttonIsHidden {
+                 let buttonTitle: String
+                 var buttonSubtitle: String?
+-                if state.purchasePending {
++                if LocalDemoPolicy.isEnabled {
++                    buttonTitle = "Включить бесплатно"
++                } else if state.purchasePending {
+                     buttonTitle = environment.strings.Premium_Purchase_Pending
+                 } else if case let .auth(price, days) = context.component.source {
+                     buttonTitle = environment.strings.Premium_Week_SignUp(price).string
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
+@@ -1596,7 +1596,7 @@
+                 if isMyProfile {
+                     availablePanes?.insert(.stories, at: 0)
+                     if availablePanes != nil, profileGiftsContext != nil, let cachedData = peerView.cachedData as? CachedUserData {
+-                        if let starGiftsCount = cachedData.starGiftsCount, starGiftsCount > 0 {
++                        if (cachedData.starGiftsCount ?? 0) > 0 || localProfileGiftCount(accountId: context.account.peerId.toInt64(), peerId: peerId.toInt64()) > 0 {
+                             availablePanes?.insert(.gifts, at: 1)
+                         }
+                     }
+@@ -1609,7 +1609,7 @@
+                     }
+                     
+                     if availablePanes != nil, profileGiftsContext != nil, let cachedData = peerView.cachedData as? CachedUserData, peerView.peerId != context.account.peerId {
+-                        if let starGiftsCount = cachedData.starGiftsCount, starGiftsCount > 0 {
++                        if (cachedData.starGiftsCount ?? 0) > 0 || localProfileGiftCount(accountId: context.account.peerId.toInt64(), peerId: peerId.toInt64()) > 0 {
+                             availablePanes?.insert(.gifts, at: hasStories ? 1 : 0)
+                         }
+                     }
 diff --git a/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift b/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
 --- a/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
 +++ b/submodules/InAppPurchaseManager/Sources/InAppPurchaseManager.swift
-@@ -348,6 +348,9 @@
+@@ -348,6 +348,13 @@
      }
      
      public func buyProduct(_ product: Product, quantity: Int32 = 1, purpose: AppStoreTransactionPurpose, reportPending: Bool = false) -> Signal<PurchaseState, PurchaseError> {
 +        if LocalDemoPolicy.isEnabled {
-+            return .fail(.notAllowed)
++            guard case let .authorized(engine) = self.engine else { return .fail(.notAllowed) }
++            let months: Int32 = product.id.contains("twelveMonths") || product.id.hasSuffix(".annual") ? 12 : product.id.contains("sixMonths") || product.id.hasSuffix(".semiannual") ? 6 : product.id.contains("threeMonths") ? 3 : 1
++            return localStorePurchase(account: engine.account, purpose: purpose, premiumMonths: months)
++            |> mapError { _ in PurchaseError.notAllowed }
++            |> map { _ in PurchaseState.purchased(transactionId: "local-" + UUID().uuidString) }
 +        }
          let accountPeerId: String
          switch self.engine {
@@ -521,6 +973,20 @@ diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sour
                  }
                  starTransition.setFrame(view: balanceView, frame: balanceFrame)
              }
+@@ -1487,6 +1546,13 @@
+                         customTheme: nil,
+                         completion: { [weak self] stars in
+                             guard let self else {
++                                return
++                            }
++                            if LocalDemoPolicy.isEnabled, let navigationController = self.navigationController as? NavigationController {
++                                let chat = context.sharedContext.makeChatController(context: context, chatLocation: .peer(id: peerId), subject: nil, botStart: nil, mode: .standard(.default), params: nil)
++                                chat.hintPlayNextOutgoingGift()
++                                let controllers = navigationController.viewControllers.filter { !($0 is ContactSelectionController) }
++                                navigationController.setViewControllers(controllers + [chat], animated: true)
+                                 return
+                             }
+                             
 diff --git a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/BUILD b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/BUILD
 --- a/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/BUILD
 +++ b/submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/BUILD
@@ -698,7 +1164,7 @@ diff --git a/NativePreview/manage.py b/NativePreview/manage.py
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/manage.py
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,173 @@
 +#!/usr/bin/env python3
 +"""Configure and build the native iPhone preview without handling account sessions."""
 +import argparse
@@ -749,7 +1215,8 @@ new file mode 100644
 +        "missing_submodules": missing,
 +        "native_compilation_verified": False,
 +        "device_ui_verified": False,
-+        "virtual_gifts_ported": False,
++        "virtual_gifts_ported": True,
++        "virtual_gifts_runtime_verified": False,
 +    }
 +
 +
@@ -966,10 +1433,10 @@ diff --git a/NativePreview/README.md b/NativePreview/README.md
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/README.md
-@@ -0,0 +1,51 @@
-+# Telegram · Native для iPhone
+@@ -0,0 +1,53 @@
++# Telegram для iPhone
 +
-+Нативный проект на открытых исходниках TelegramMessenger/Telegram-iOS. Исходный интерфейс, жесты, плеер, анимации, авторизация, чаты и обработка настоящего Premium сохранены. Это неофициальная демо-сборка. Отдельное приложение для Mac не создаётся.
++Нативный проект на открытых исходниках TelegramMessenger/Telegram-iOS. Используются исходные интерфейс, жесты, плеер, анимации, авторизация и чаты. Это неофициальный клиент с локальными визуальными операциями. Отдельное приложение для Mac не создаётся.
 +
 +**Статус:** исходники и настройки подготовлены на Windows. Проект ещё не компилировался в Xcode, не подписывался и не проверялся на iPhone или симуляторе. Готового установочного IPA нет. Версия и требуемый Xcode закреплены в `../versions.json`; точная ревизия и зависимости — в `upstream.json`.
 +
@@ -977,11 +1444,13 @@ new file mode 100644
 +
 +* Локальный баланс Stars по умолчанию 9 999 999, отдельно для каждого аккаунта
 +* Значение сохраняется в контейнере приложения и не подменяет данные на сервере
-+* Раздел Stars помечен «Демо»; история реальных операций не смешивается с демо-балансом
-+* Добавлена блокировка платёжных форм, финансовых изменений, платных сообщений и запуска покупок StoreKit
-+* Premium определяется по настоящему аккаунту; новая подписка не покупается и не подделывается
++* Балансы Stars и GRAM редактируются двойным нажатием; увеличение создаёт отдельную запись App Store или Fragment. Запись удаляется долгим нажатием без изменения баланса
++* Обычные подарки и выбранные варианты NFT создаются как локальные сервисные сообщения и подарки профиля. Модель, узор и фон сохраняются; локальный экземпляр больше не помечен как продающийся. Повторная покупка использует отдельную карточку маркета
++* Скрытие локальных подарков сохраняется на устройстве. Аккаунты и получатели разделены
++* Подарки Premium и Stars используют локальный расчёт. Настоящие платежи, переводы и StoreKit не вызываются
++* Настоящий Premium аккаунта сохраняется. Кнопка бесплатного включения отдельно объясняет локальный режим: он не выдаёт подписку и серверные возможности Telegram
 +* Для установки без App Groups добавлен запасной путь в собственном контейнере приложения и режим собственного Keychain; шифрование и проверка код-пароля сохраняются
-+* Виртуальные подарки в чатах и профилях в эту нативную версию пока не перенесены
++* Долгое нажатие на заголовок Stars открывает дополнительные настройки оформления. Переключатель меняет палитру нативного интерфейса
 +
 +Блокировка добавлена в исходники, но её работа внутри собранного iOS-приложения ещё не проверена. Это предварительный проект, а не проверенный релиз.
 +
@@ -1115,7 +1584,7 @@ diff --git a/NativePreview/Tests/main.swift b/NativePreview/Tests/main.swift
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/Tests/main.swift
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,89 @@
 +import Foundation
 +
 +var checks = 0
@@ -1168,6 +1637,20 @@ new file mode 100644
 +check(LocalDemoBalanceStore.set(accountId: 1, amount: 1250000000, ton: true, defaults: defaults) == 1250000000, "GRAM preserves nanoton precision")
 +check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 105, "GRAM never changes Stars")
 +check(LocalDemoBalanceStore.receipts(accountId: 1, ton: true, defaults: defaults).first?.amount == 1250000000, "GRAM gets its own credit receipt")
++let fakeGift = LocalDemoBalanceStore.ProfileGift(id: "local-gift-1", peerId: 99, data: Data("visible".utf8))
++let fakeReceipt = LocalDemoBalanceStore.Receipt(id: "local-gift-1", amount: -5, date: 1)
++check(LocalDemoBalanceStore.spend(accountId: 1, price: 5, ton: false, receipt: fakeReceipt, gift: fakeGift, defaults: defaults), "Gift commits balance, receipt and profile atomically")
++check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 100, "Gift deducts the selected price")
++check(!LocalDemoBalanceStore.spend(accountId: 1, price: 5, ton: false, receipt: fakeReceipt, gift: fakeGift, defaults: defaults), "One checkout token cannot be charged twice")
++check(LocalDemoBalanceStore.gifts(accountId: 1, peerId: 99, defaults: defaults).count == 1, "Gift belongs to the selected recipient")
++check(LocalDemoBalanceStore.gifts(accountId: 2, peerId: 99, defaults: defaults).isEmpty, "Profile gifts are account isolated")
++LocalDemoBalanceStore.updateGift(accountId: 1, id: fakeGift.id, data: Data("hidden".utf8), defaults: defaults)
++check(LocalDemoBalanceStore.gifts(accountId: 1, peerId: 99, defaults: UserDefaults(suiteName: suiteName)!).first?.data == Data("hidden".utf8), "Hidden state persists across reopening")
++LocalDemoBalanceStore.removeReceipt(accountId: 1, id: fakeReceipt.id, defaults: defaults)
++check(LocalDemoBalanceStore.gifts(accountId: 1, peerId: 99, defaults: defaults).count == 1, "Deleting a receipt preserves the profile gift")
++check(LocalDemoBalanceStore.balance(accountId: 1, defaults: defaults) == 100, "Deleting gift history does not refund its cost")
++_ = LocalDemoBalanceStore.set(accountId: 1, amount: 200, defaults: defaults)
++check(LocalDemoBalanceStore.gifts(accountId: 1, peerId: 99, defaults: defaults).count == 1, "Editing a balance preserves profile gifts")
 +defaults.removePersistentDomain(forName: suiteName)
 +
 +let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("stargram-native-storage-test-" + UUID().uuidString, isDirectory: true)
