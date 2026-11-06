@@ -11,7 +11,7 @@ workflows:
         PYTHONUNBUFFERED: '1'
     cache:
       cache_paths:
-        - $CM_BUILD_DIR/source/NativePreview/.cache/repository
+        - $HOME/.cache/stargram-native-ios
     scripts:
       - name: Verify pinned source and host
         script: |
@@ -28,13 +28,15 @@ workflows:
       - name: Configure API privately
         script: python3 source/NativePreview/manage.py configure
       - name: Test policy and compile complete iPhone app
-        script: python3 source/NativePreview/manage.py build --target iphone --unsigned --build-number "$((100001 + ${PROJECT_BUILD_NUMBER:-0}))"
+        script: python3 CI/native_build.py --build-number "$((100001 + ${PROJECT_BUILD_NUMBER:-0}))"
       - name: Check iPhone architecture and export IPA
         script: python3 CI/export.py --target iphone --unsigned
     artifacts:
       - native-output/Telegram.ipa
       - native-output/verification.json
       - native-output/INSTALL-IPHONE.md
+      - native-output/effective-source.json
+      - native-output/native-attempt-*.log
 
   simulator:
     name: Native iPhone simulator preview
@@ -48,7 +50,7 @@ workflows:
         PYTHONUNBUFFERED: '1'
     cache:
       cache_paths:
-        - $CM_BUILD_DIR/source/NativePreview/.cache/repository
+        - $HOME/.cache/stargram-native-ios
     scripts:
       - name: Verify source kit
         script: python3 Bootstrap.py --check-only

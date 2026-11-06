@@ -1188,7 +1188,7 @@ diff --git a/NativePreview/manage.py b/NativePreview/manage.py
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/manage.py
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,181 @@
 +#!/usr/bin/env python3
 +"""Configure and build the native iPhone preview without handling account sessions."""
 +import argparse
@@ -1286,11 +1286,19 @@ new file mode 100644
 +        subprocess.run([str(binary)], cwd=ROOT, check=True)
 +
 +
++def cache_root():
++    value = Path(os.environ.get("TELEGRAM_NATIVE_CACHE", str(Path.home() / ".cache" / "stargram-native-ios"))).expanduser().resolve()
++    if value.is_relative_to(ROOT.resolve()):
++        raise ValueError("TELEGRAM_NATIVE_CACHE must be outside the source tree")
++    return value
++
++
 +def make_command(args):
-+    command = [sys.executable, "build-system/Make/Make.py", "--cacheDir=" + str(HERE / ".cache")]
++    cache = cache_root()
++    command = [sys.executable, "build-system/Make/Make.py", "--cacheDir=" + str(cache)]
 +    unsigned = getattr(args, "unsigned", False)
 +    if args.action == "build":
-+        flags = ["--jobs=2", "--local_resources=memory=HOST_RAM*0.6", "--repository_cache=" + str(HERE / ".cache/repository")]
++        flags = ["--jobs=1", "--local_resources=memory=HOST_RAM*0.6", "--repository_cache=" + str(cache / "repository")]
 +        if args.target == "simulator" or unsigned:
 +            flags.append("--//Telegram:disableProvisioningProfiles")
 +        if unsigned:
