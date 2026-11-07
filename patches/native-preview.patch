@@ -1188,7 +1188,7 @@ diff --git a/NativePreview/manage.py b/NativePreview/manage.py
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/manage.py
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,202 @@
 +#!/usr/bin/env python3
 +"""Configure and build the native iPhone preview without handling account sessions."""
 +import argparse
@@ -1293,6 +1293,13 @@ new file mode 100644
 +    return value
 +
 +
++def ensure_metal_toolchain():
++    probe = ["xcrun", "--sdk", "iphoneos", "metal", "--version"]
++    if subprocess.run(probe, capture_output=True).returncode != 0:
++        subprocess.run(["xcodebuild", "-downloadComponent", "MetalToolchain"], check=True)
++        subprocess.run(probe, check=True)
++
++
 +def prepare_unsigned_device_packaging():
 +    rules_apple = ROOT / "build-system/bazel-rules/rules_apple"
 +    command = ["git", "-C", str(rules_apple), "apply"]
@@ -1368,6 +1375,8 @@ new file mode 100644
 +    if args.build_number < 1:
 +        raise ValueError("Build number must be positive")
 +    policy_tests()
++    if args.action == "build":
++        ensure_metal_toolchain()
 +    if args.unsigned:
 +        prepare_unsigned_device_packaging()
 +    subprocess.run(command, cwd=ROOT, check=True)

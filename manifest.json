@@ -66,7 +66,7 @@
   "native_compilation_verified": false,
   "device_ui_verified": false,
   "virtual_gifts_ported": false,
-  "patch_sha256": "b6212bc4b85638002065f301640464dad080387069782b6d5441254a22fe6c77",
+  "patch_sha256": "4c407246f29be62f51136f29531ee882efc25b0e9841d77079cd221abca1996a",
   "patched_files": [
     ".gitignore",
     "build-system/Make/Make.py",
