@@ -36,6 +36,33 @@ diff --git a/build-system/Make/Make.py b/build-system/Make/Make.py
  
      if arguments.lock:
          bazel_command_line.set_lock(True)
+diff --git a/third-party/td/build-td-bazel.sh b/third-party/td/build-td-bazel.sh
+--- a/third-party/td/build-td-bazel.sh
++++ b/third-party/td/build-td-bazel.sh
+@@ -9,8 +9,13 @@
+ BUILD_DIR=$(echo "$(cd "$(dirname "$3")"; pwd -P)/$(basename "$3")")
+ OPENSSL_DIR="$4"
+ 
++ccache_option=""
++if ! command -v ccache >/dev/null 2>&1; then
++  ccache_option="-DCCACHE_FOUND=0"
++fi
++
+ openssl_crypto_library="${OPENSSL_DIR}/lib/libcrypto.a"
+-options=""
++options="$ccache_option"
+ options="$options -DOPENSSL_FOUND=1"
+ options="$options -DOPENSSL_CRYPTO_LIBRARY=${openssl_crypto_library}"
+ options="$options -DOPENSSL_INCLUDE_DIR=${OPENSSL_DIR}/src/include"
+@@ -22,7 +27,7 @@
+ # Generate source files
+ mkdir native-build
+ cd native-build
+-cmake -DTD_GENERATE_SOURCE_FILES=ON ../td
++cmake -DTD_GENERATE_SOURCE_FILES=ON $ccache_option ../td
+ cmake --build . -- -j$(sysctl -n hw.ncpu)
+ cd ..
+ 
 diff --git a/Telegram/Telegram-iOS/InfoBazel.plist b/Telegram/Telegram-iOS/InfoBazel.plist
 --- a/Telegram/Telegram-iOS/InfoBazel.plist
 +++ b/Telegram/Telegram-iOS/InfoBazel.plist
