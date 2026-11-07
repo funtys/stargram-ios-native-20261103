@@ -66,7 +66,7 @@
   "native_compilation_verified": false,
   "device_ui_verified": false,
   "virtual_gifts_ported": false,
-  "patch_sha256": "7e490487e5c33d365205d7b5f9dcc12adf5ce48be3ef201dcbb8961363c2a123",
+  "patch_sha256": "b6212bc4b85638002065f301640464dad080387069782b6d5441254a22fe6c77",
   "patched_files": [
     ".gitignore",
     "build-system/Make/Make.py",
@@ -92,6 +92,7 @@
     "submodules/TelegramUI/Sources/NativePreviewStorage.swift",
     "submodules/PasscodeCore/Sources/Passcode.swift",
     "NativePreview/manage.py",
+    "NativePreview/unsigned-device-build.patch",
     "NativePreview/artifact.py",
     "NativePreview/README.md",
     "NativePreview/configuration.example.json",

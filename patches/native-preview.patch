@@ -1188,7 +1188,7 @@ diff --git a/NativePreview/manage.py b/NativePreview/manage.py
 new file mode 100644
 --- /dev/null
 +++ b/NativePreview/manage.py
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,193 @@
 +#!/usr/bin/env python3
 +"""Configure and build the native iPhone preview without handling account sessions."""
 +import argparse
@@ -1293,6 +1293,16 @@ new file mode 100644
 +    return value
 +
 +
++def prepare_unsigned_device_packaging():
++    rules_apple = ROOT / "build-system/bazel-rules/rules_apple"
++    command = ["git", "-C", str(rules_apple), "apply"]
++    patch = str(HERE / "unsigned-device-build.patch")
++    applied = subprocess.run(command + ["--reverse", "--check", patch], capture_output=True)
++    if applied.returncode != 0:
++        subprocess.run(command + ["--check", patch], check=True)
++        subprocess.run(command + [patch], check=True)
++
++
 +def make_command(args):
 +    cache = cache_root()
 +    command = [sys.executable, "build-system/Make/Make.py", "--cacheDir=" + str(cache)]
@@ -1358,6 +1368,8 @@ new file mode 100644
 +    if args.build_number < 1:
 +        raise ValueError("Build number must be positive")
 +    policy_tests()
++    if args.unsigned:
++        prepare_unsigned_device_packaging()
 +    subprocess.run(command, cwd=ROOT, check=True)
 +
 +
@@ -1370,6 +1382,20 @@ new file mode 100644
 +    except subprocess.CalledProcessError as error:
 +        print("Native build/check failed; no successful IPA is claimed", file=sys.stderr)
 +        sys.exit(error.returncode or 1)
+diff --git a/NativePreview/unsigned-device-build.patch b/NativePreview/unsigned-device-build.patch
+new file mode 100644
+--- /dev/null
++++ b/NativePreview/unsigned-device-build.patch
+@@ -0,0 +1,9 @@
++diff --git a/apple/internal/ios_rules.bzl b/apple/internal/ios_rules.bzl
++--- a/apple/internal/ios_rules.bzl
+++++ b/apple/internal/ios_rules.bzl
++@@ -452,4 +452,4 @@ def _ios_application_impl(ctx):
++-    if platform_prerequisites.platform.is_device:
+++    if platform_prerequisites.platform.is_device and (provisioning_profile or "disable_legacy_signing" not in features):
++         processor_partials.append(
++             partials.provisioning_profile_partial(
++                 actions = actions,
 diff --git a/NativePreview/artifact.py b/NativePreview/artifact.py
 new file mode 100644
 --- /dev/null
